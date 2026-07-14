@@ -6,35 +6,6 @@ The network models a small company (an LLM startup) with two office floors, a da
 
 ## Architecture
 
-```
-                                   +-------------------+
-                                   |     h_trust        |
-                                   |  192.47.38.109/24   |
-                                   +---------+-----------+
-                                             |
-+-------------------+              +--------+---------+              +-------------------+
-|     h_untrust       +--------------+                  +--------------+   Data Center      |
-| 108.35.24.113/24     |              |    Core (s6)      |              |   Switch (s5)      |
-+-------------------+              +---+----------+----+              +---------+---------+
-                                        |          |                              |
-                         +--------------+          +--------------+               |
-                         |                                         |               |
-                   +-----+------+                            +-----+------+   +----+-----+
-                   | Floor 1     |                            | Floor 2     |   | h_server |
-                   | (Dept A)    |                            | (Dept B)    |   |10.1.3.178|
-                   | 10.1.1.0/24 |                            | 10.1.2.0/24 |   |   /24    |
-                   +-----+------+                            +-----+------+   +----------+
-                         |                                         |
-                 +-------+-------+                         +-------+-------+
-                 |               |                         |               |
-              +--+--+         +--+--+                   +--+--+         +--+--+
-              | s1  |         | s2  |                   | s3  |         | s4  |
-              +--+--+         +--+--+                   +--+--+         +--+--+
-               |    |           |    |                    |    |          |   |
-           h101  h102       h103  h104                h201  h202      h203 h204
-        10.1.1.101 .102   10.1.1.103 .104          10.1.2.201 .202  10.1.2.203 .204
-```
-
 - **6 switches total:** `s1`–`s4` split each floor into two switches, `s5` fronts the data center, `s6` is the network core.
 - **5 zones, 5 subnets:** Dept A (`10.1.1.0/24`, spanning `s1`+`s2`), Dept B (`10.1.2.0/24`, spanning `s3`+`s4`), Data Center (`10.1.3.0/24`), trust boundary (`192.47.38.0/24`), untrust boundary (`108.35.24.0/24`). Every host's default route points at its zone's `.1` gateway — an IP that only exists virtually, inside the controller.
 - `h_trust` and `h_untrust` connect **directly** to the core switch — they represent external trust boundaries, not internal departments, so they don't sit behind a departmental switch.
