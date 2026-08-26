@@ -30,6 +30,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>

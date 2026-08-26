@@ -1,5 +1,5 @@
 CXX := g++
-CXXFLAGS := -std=c++17 -Wall -Wextra -O2 -pthread
+CXXFLAGS := -std=c++11 -Wall -Wextra -O2 -pthread
 TARGET := firewall_daemon
 SRC := firewall_daemon.cpp
 

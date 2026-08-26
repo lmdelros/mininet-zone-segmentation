@@ -69,7 +69,7 @@ Times the same decision (raw src/dst IP + protocol → allow/deny) end-to-end on
 - **[Mininet](http://mininet.org/)** — network emulation, defines hosts/switches/links (`topology.py`)
 - **[POX](https://github.com/noxrepo/pox)** — Python-based OpenFlow SDN controller, implements the firewall/forwarding logic (`controller.py`)
 - **OpenFlow 1.0** — protocol used between Mininet's virtual switches and the POX controller
-- **C++17** — standalone firewall daemon (`cpp/firewall_daemon.cpp`), talking to the controller over a Unix domain socket
+- **C++11** — standalone firewall daemon (`cpp/firewall_daemon.cpp`), talking to the controller over a Unix domain socket
 - Python 3
 
 ## Project Structure
