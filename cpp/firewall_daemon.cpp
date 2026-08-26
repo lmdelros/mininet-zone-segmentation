@@ -226,7 +226,8 @@ int main() {
         return 1;
     }
 
-    sockaddr_un addr{};
+    sockaddr_un addr;
+    std::memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, kSocketPath, sizeof(addr.sun_path) - 1);
 
