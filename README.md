@@ -28,19 +28,62 @@ All enforcement happens in the POX controller (`controller.py`), which inspects 
 
 The intent: the LLM server is the crown jewel and is fully isolated from both trust boundaries; the untrusted zone gets the least access of any zone; departments can be segmented from each other (ICMP block) without cutting off legitimate IP traffic needed for real services.
 
+## C++ Firewall Daemon
+
+The zone-firewall decision (`firewall_allowed()`: given a source zone, destination zone, and whether the packet is ICMP, allow or deny) is implemented twice:
+
+- **Python**, in `firewall_rules.py` — the reference implementation, and the controller's fallback.
+- **C++**, in `cpp/firewall_daemon.cpp` — a standalone daemon the controller talks to over a Unix domain socket.
+
+**Why a separate process instead of a Python C extension:** a pybind11 module would have lower call overhead, but it'd be linked into the Python process rather than an independently running component — there'd be nothing to point at and say "that's the real, standalone systems code." A Unix domain socket keeps the C++ side a genuine standalone binary with its own concurrency model (thread-per-connection) and its own wire protocol (a 13-byte fixed binary request → 2-byte response, `#pragma pack(1)` on the C++ side matched byte-for-byte against Python's `struct.pack("!IIHHB", ...)`), at the cost of real IPC overhead (socket write, context switch, socket read) per decision.
+
+That overhead is real and worth stating plainly: for a rule set this cheap (two set-membership checks), `bench_firewall.py` shows the C++ daemon is **slower per decision** than calling the Python function in-process — IPC cost dominates a computation this trivial. See [Benchmark](#benchmark) below. The controller (`controller.py`) can use either backend — flip `USE_CPP_FIREWALL` — and falls back to the Python path automatically if the daemon isn't running.
+
+One deliberate behavior difference: the original controller classifies a packet's *source* zone by which switch port it arrived on (spoof-resistant — a host can lie about its IP, not about its physical port), while the C++ daemon classifies both source and destination zone from the IP addresses in the request, since that's all the wire protocol carries. In this topology every host's IP already falls inside its own zone's subnet, so the verdicts are identical in practice; a production version would pass the port-derived zone across the socket instead of re-deriving it from a spoofable IP.
+
+### Building and running the daemon
+
+```bash
+cd cpp
+make
+./firewall_daemon &        # listens on /tmp/zone_firewall.sock
+```
+
+If your Linux VM doesn't have a C++ toolchain yet:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential   # provides g++ and make
+```
+
+### Benchmark
+
+```bash
+python3 bench_firewall.py   # standalone -- no Mininet/POX required, daemon must be running
+```
+
+Times the same decision (raw src/dst IP + protocol → allow/deny) end-to-end on both paths and reports mean/p50/p99 latency in microseconds, plus the ratio between them.
+
 ## Tech Stack
 
 - **[Mininet](http://mininet.org/)** — network emulation, defines hosts/switches/links (`topology.py`)
 - **[POX](https://github.com/noxrepo/pox)** — Python-based OpenFlow SDN controller, implements the firewall/forwarding logic (`controller.py`)
 - **OpenFlow 1.0** — protocol used between Mininet's virtual switches and the POX controller
+- **C++17** — standalone firewall daemon (`cpp/firewall_daemon.cpp`), talking to the controller over a Unix domain socket
 - Python 3
 
 ## Project Structure
 
 ```
 .
-├── topology.py     # Mininet network topology (6 switches, 10 hosts)
-├── controller.py   # POX controller: firewall + forwarding logic
+├── topology.py         # Mininet network topology (6 switches, 10 hosts)
+├── controller.py        # POX controller: routing, ARP, firewall dispatch (Python or C++ backend)
+├── firewall_rules.py     # Pure Python zone/firewall rule logic (no POX dependency)
+├── firewall_client.py     # Python client for the C++ firewall daemon (Unix domain socket)
+├── bench_firewall.py       # Latency benchmark: Python in-process vs. C++ daemon
+├── cpp/
+│   ├── firewall_daemon.cpp  # Standalone C++ firewall daemon
+│   └── Makefile
 └── README.md
 ```
 
@@ -48,19 +91,23 @@ The intent: the LLM server is the crown jewel and is fully isolated from both tr
 
 Requires Mininet, Open vSwitch, and a Python-3-compatible build of POX (this project targets Python 3; older POX branches like `carp` predate Python 3 support and won't run it) — typically run inside a Linux VM, since Mininet needs real Linux network namespaces.
 
-1. Put `controller.py` where POX can find it as a component, e.g. copy it into POX's `ext/` folder:
+1. Put `controller.py` where POX can find it as a component, e.g. copy it into POX's `ext/` folder — along with `firewall_rules.py` and `firewall_client.py`, since `controller.py` imports them as siblings:
    ```bash
-   cp controller.py <path-to-pox>/ext/controller.py
+   cp controller.py firewall_rules.py firewall_client.py <path-to-pox>/ext/
    ```
-2. Start the POX controller with the custom module:
+2. Build and start the C++ firewall daemon (see [C++ Firewall Daemon](#c-firewall-daemon) above). Skip this step if you set `USE_CPP_FIREWALL = False` in `controller.py` — it'll use the pure-Python path instead:
+   ```bash
+   cd cpp && make && ./firewall_daemon &
+   ```
+3. Start the POX controller with the custom module:
    ```bash
    cd <path-to-pox> && ./pox.py controller
    ```
-3. In a separate terminal, launch the topology, pointing it at the controller:
+4. In a separate terminal, launch the topology, pointing it at the controller:
    ```bash
    sudo python3 topology.py
    ```
-4. From the Mininet CLI, test connectivity between zones, e.g.:
+5. From the Mininet CLI, test connectivity between zones, e.g.:
    ```
    mininet> h_untrust ping h_server      # should fail (rule 1)
    mininet> h101 ping h102               # should succeed (same switch)

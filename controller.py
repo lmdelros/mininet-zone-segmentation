@@ -39,8 +39,6 @@ actively ARPs into the destination zone, queues the pending packet, and
 retries a few times before giving up.
 """
 
-import ipaddress
-
 from pox.core import core
 import pox.openflow.libopenflow_01 as of
 from pox.lib.packet.ethernet import ethernet, ETHER_BROADCAST
@@ -49,41 +47,21 @@ from pox.lib.packet.ipv4 import ipv4
 from pox.lib.packet.icmp import icmp
 from pox.lib.recoco import Timer
 
+from firewall_rules import ZONES, zone_for_ip, firewall_allowed
+from firewall_client import FirewallClient, IPPROTO_ICMP
+
 log = core.getLogger()
+
+# Set to False to use the pure-Python firewall_allowed() (firewall_rules.py)
+# instead of the C++ daemon. Flip this for a live A/B demo, or as a
+# fallback if the daemon isn't running -- see ZoneRouter._firewall_allowed.
+USE_CPP_FIREWALL = True
 
 # ---------------------------------------------------------------------------
 # Static network configuration, derived from topology.py
 # ---------------------------------------------------------------------------
 
 CORE_DPID = 6
-
-ZONES = {
-    'DeptA': {
-        'subnet': ipaddress.ip_network('10.1.1.0/24'),
-        'gateway': '10.1.1.1',
-        'gateway_mac': '02:00:00:00:00:01',
-    },
-    'DeptB': {
-        'subnet': ipaddress.ip_network('10.1.2.0/24'),
-        'gateway': '10.1.2.1',
-        'gateway_mac': '02:00:00:00:00:02',
-    },
-    'DataCenter': {
-        'subnet': ipaddress.ip_network('10.1.3.0/24'),
-        'gateway': '10.1.3.1',
-        'gateway_mac': '02:00:00:00:00:03',
-    },
-    'Trust': {
-        'subnet': ipaddress.ip_network('192.47.38.0/24'),
-        'gateway': '192.47.38.1',
-        'gateway_mac': '02:00:00:00:00:04',
-    },
-    'Untrust': {
-        'subnet': ipaddress.ip_network('108.35.24.0/24'),
-        'gateway': '108.35.24.1',
-        'gateway_mac': '02:00:00:00:00:05',
-    },
-}
 
 # Leaf switches (dpid 1-5): every port belongs to the same zone.
 SWITCH_ZONE = {
@@ -108,20 +86,6 @@ ZONE_CORE_PORTS = {}
 for _port, _zone in CORE_PORT_ZONES.items():
     ZONE_CORE_PORTS.setdefault(_zone, []).append(_port)
 
-BLOCK_ALL_IP = {
-    ('Untrust', 'DataCenter'),
-    ('Trust', 'DataCenter'),
-}
-
-BLOCK_ICMP = {
-    ('Untrust', 'DeptA'),
-    ('Untrust', 'DeptB'),
-    ('Untrust', 'DataCenter'),
-    ('Trust', 'DeptB'),
-    ('DeptA', 'DeptB'),
-    ('DeptB', 'DeptA'),
-}
-
 ARP_RETRY_INTERVAL = 1  # seconds
 ARP_MAX_RETRIES = 3
 
@@ -137,22 +101,6 @@ def zone_of_port(dpid, port):
     return SWITCH_ZONE.get(dpid)
 
 
-def zone_for_ip(ip):
-    addr = ipaddress.ip_address(str(ip))
-    for name, zone in ZONES.items():
-        if addr in zone['subnet']:
-            return name
-    return None
-
-
-def firewall_allowed(src_zone, dst_zone, is_icmp):
-    if (src_zone, dst_zone) in BLOCK_ALL_IP:
-        return False
-    if is_icmp and (src_zone, dst_zone) in BLOCK_ICMP:
-        return False
-    return True
-
-
 class ZoneRouter(object):
 
     def __init__(self):
@@ -160,8 +108,31 @@ class ZoneRouter(object):
         self.mac_table = {}            # dpid -> {mac: port}
         self.ip_to_loc = {}            # ip -> (dpid, port, mac, zone)
         self.pending = {}              # ip -> {zone, queue, retries, timer}
+        self._fw_client = FirewallClient() if USE_CPP_FIREWALL else None
+        self._fw_fallback_warned = False
         core.openflow.addListeners(self)
-        log.info("Zone-segmentation router/firewall started")
+        log.info("Zone-segmentation router/firewall started (firewall backend: %s)",
+                  "C++ daemon" if USE_CPP_FIREWALL else "Python")
+
+    # -- firewall dispatch --------------------------------------------------
+
+    def _firewall_allowed(self, src_zone, dst_zone, is_icmp, ip_pkt):
+        """Ask the C++ daemon for a verdict; fall back to the in-process
+        Python implementation if the daemon is unreachable, so a dead
+        daemon degrades the controller instead of breaking it outright.
+        """
+        if self._fw_client is not None:
+            try:
+                allowed, _rule_id = self._fw_client.is_allowed(
+                    ip_pkt.srcip, ip_pkt.dstip,
+                    IPPROTO_ICMP if is_icmp else 0)
+                return allowed
+            except OSError:
+                if not self._fw_fallback_warned:
+                    log.warning("C++ firewall daemon unreachable; "
+                                "falling back to Python firewall_allowed()")
+                    self._fw_fallback_warned = True
+        return firewall_allowed(src_zone, dst_zone, is_icmp)
 
     # -- connection bookkeeping ------------------------------------------
 
@@ -274,7 +245,7 @@ class ZoneRouter(object):
             self._l2_forward(event, dpid, in_port, packet.dst)
             return
 
-        if not firewall_allowed(src_zone, dst_zone, is_icmp):
+        if not self._firewall_allowed(src_zone, dst_zone, is_icmp, ip_pkt):
             log.info("DROP %s -> %s (%s): %s -> %s", src_zone, dst_zone,
                       "ICMP" if is_icmp else "IP", ip_pkt.srcip, ip_pkt.dstip)
             return
