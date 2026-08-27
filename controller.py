@@ -198,15 +198,17 @@ class ZoneRouter(object):
                          target_ip, target_mac):
         reply = arp()
         reply.opcode = arp.REPLY
-        # arp's hwsrc/hwdst/protosrc/protodst are plain attributes with no
-        # converting setter -- unlike ethernet's src/dst, assigning a raw
-        # string here (instead of an EthAddr/IPAddr) leaves it a str, and
-        # arp.pack() later crashes calling .toRaw() on it.
+        # Neither arp's hwsrc/hwdst/protosrc/protodst nor ethernet's
+        # src/dst do any implicit conversion -- packing later calls
+        # .toRaw() only if the value is already exactly an EthAddr
+        # (ethernet.hdr() checks `type(x) is EthAddr`), so a plain str
+        # passed straight from the ZONES table crashes at pack() time.
+        # Wrap explicitly rather than relying on the constructor.
         reply.hwsrc = EthAddr(sender_mac)
         reply.hwdst = EthAddr(target_mac)
         reply.protosrc = IPAddr(str(sender_ip))
         reply.protodst = IPAddr(str(target_ip))
-        eth = ethernet(type=ethernet.ARP_TYPE, src=sender_mac, dst=target_mac)
+        eth = ethernet(type=ethernet.ARP_TYPE, src=EthAddr(sender_mac), dst=EthAddr(target_mac))
         eth.payload = reply
         self._packet_out(connection, eth, out_port)
 
@@ -221,7 +223,7 @@ class ZoneRouter(object):
         req.hwdst = ETHER_BROADCAST
         req.protosrc = IPAddr(gw['gateway'])
         req.protodst = dst_ip
-        eth = ethernet(type=ethernet.ARP_TYPE, src=gw['gateway_mac'], dst=ETHER_BROADCAST)
+        eth = ethernet(type=ethernet.ARP_TYPE, src=EthAddr(gw['gateway_mac']), dst=ETHER_BROADCAST)
         eth.payload = req
         for port in ZONE_CORE_PORTS.get(dst_zone, []):
             self._packet_out(connection, eth, port)
@@ -276,7 +278,7 @@ class ZoneRouter(object):
         if connection is None:
             return
         ip_pkt.ttl -= 1
-        gw_mac = ZONES[dst_zone]['gateway_mac']
+        gw_mac = EthAddr(ZONES[dst_zone]['gateway_mac'])
         eth = ethernet(type=ethernet.IP_TYPE, src=gw_mac, dst=dst_mac)
         eth.payload = ip_pkt
         self._packet_out(connection, eth, out_port)
@@ -343,7 +345,7 @@ class ZoneRouter(object):
         reply_ip.dstip = ip_pkt.srcip
         reply_ip.payload = err
 
-        eth = ethernet(type=ethernet.IP_TYPE, src=gw['gateway_mac'], dst=packet.src)
+        eth = ethernet(type=ethernet.IP_TYPE, src=EthAddr(gw['gateway_mac']), dst=packet.src)
         eth.payload = reply_ip
         self._packet_out(connection, eth, orig_port)
 
