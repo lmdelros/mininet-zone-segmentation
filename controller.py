@@ -41,6 +41,7 @@ retries a few times before giving up.
 
 from pox.core import core
 import pox.openflow.libopenflow_01 as of
+from pox.lib.addresses import EthAddr, IPAddr
 from pox.lib.packet.ethernet import ethernet, ETHER_BROADCAST
 from pox.lib.packet.arp import arp
 from pox.lib.packet.ipv4 import ipv4
@@ -197,10 +198,14 @@ class ZoneRouter(object):
                          target_ip, target_mac):
         reply = arp()
         reply.opcode = arp.REPLY
-        reply.hwsrc = sender_mac
-        reply.hwdst = target_mac
-        reply.protosrc = sender_ip
-        reply.protodst = target_ip
+        # arp's hwsrc/hwdst/protosrc/protodst are plain attributes with no
+        # converting setter -- unlike ethernet's src/dst, assigning a raw
+        # string here (instead of an EthAddr/IPAddr) leaves it a str, and
+        # arp.pack() later crashes calling .toRaw() on it.
+        reply.hwsrc = EthAddr(sender_mac)
+        reply.hwdst = EthAddr(target_mac)
+        reply.protosrc = IPAddr(str(sender_ip))
+        reply.protodst = IPAddr(str(target_ip))
         eth = ethernet(type=ethernet.ARP_TYPE, src=sender_mac, dst=target_mac)
         eth.payload = reply
         self._packet_out(connection, eth, out_port)
@@ -212,9 +217,9 @@ class ZoneRouter(object):
         gw = ZONES[dst_zone]
         req = arp()
         req.opcode = arp.REQUEST
-        req.hwsrc = gw['gateway_mac']
+        req.hwsrc = EthAddr(gw['gateway_mac'])
         req.hwdst = ETHER_BROADCAST
-        req.protosrc = gw['gateway']
+        req.protosrc = IPAddr(gw['gateway'])
         req.protodst = dst_ip
         eth = ethernet(type=ethernet.ARP_TYPE, src=gw['gateway_mac'], dst=ETHER_BROADCAST)
         eth.payload = req
@@ -334,7 +339,7 @@ class ZoneRouter(object):
 
         reply_ip = ipv4()
         reply_ip.protocol = ipv4.ICMP_PROTOCOL
-        reply_ip.srcip = gw['gateway']
+        reply_ip.srcip = IPAddr(gw['gateway'])
         reply_ip.dstip = ip_pkt.srcip
         reply_ip.payload = err
 
