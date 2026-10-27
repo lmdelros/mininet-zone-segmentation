@@ -217,8 +217,18 @@ int main(int argc, char** argv) {
     // to run a private daemon without clobbering one already running).
     const char* socket_path = argc > 1 ? argv[1] : kDefaultSocketPath;
 
-    std::signal(SIGINT, HandleSignal);
-    std::signal(SIGTERM, HandleSignal);
+    // sigaction rather than std::signal: glibc's signal() sets SA_RESTART,
+    // which makes the kernel silently restart a blocked accept() after the
+    // handler runs -- so the shutdown flag below would never be checked
+    // and SIGINT/SIGTERM would be ignored. Without SA_RESTART, accept()
+    // returns EINTR and the loop exits.
+    struct sigaction sa;
+    std::memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = HandleSignal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
 
     // A stale socket file from a previous (crashed) run would otherwise
     // make bind() fail with EADDRINUSE.
