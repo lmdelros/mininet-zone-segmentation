@@ -1,5 +1,7 @@
 # mininet-zone-segmentation
 
+[![CI](https://github.com/lmdelros/mininet-zone-segmentation/actions/workflows/ci.yml/badge.svg)](https://github.com/lmdelros/mininet-zone-segmentation/actions/workflows/ci.yml)
+
 A simulated enterprise network built with [Mininet](http://mininet.org/) and [POX](https://github.com/noxrepo/pox), implementing SDN-based routing and firewall zone segmentation between department subnets, a protected server zone, and external trust boundaries.
 
 The network models a small company (an LLM startup) with two office floors, a data center hosting the LLM server, and explicit trusted/untrusted external zones. A custom POX controller acts as the network's router *and* firewall: it owns the gateway IP for every zone, answers ARP for those gateways, routes between zones, and enforces zone-segmentation policy while doing it — no traditional firewall appliance, no static ACLs on switches.
