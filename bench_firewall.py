@@ -29,7 +29,7 @@ SAMPLE_PACKETS = [
     ("192.47.38.109", "10.1.2.201", 1),   # trust -> DeptB, ICMP: blocked (rule 4)
     ("192.47.38.109", "10.1.1.101", 6),   # trust -> DeptA: allowed (rule 5)
     ("10.1.1.101", "10.1.2.201", 1),      # DeptA -> DeptB, ICMP: blocked (rule 6)
-    ("10.1.1.101", "10.1.2.201", 6),      # DeptA -> DeptB, TCP: allowed (rule 8)
+    ("10.1.1.101", "10.1.2.201", 6),      # DeptA -> DeptB, TCP: allowed (rule 9)
 ]
 
 ITERATIONS = 20000  # per sample packet, so total decisions = ITERATIONS * len(SAMPLE_PACKETS)

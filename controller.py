@@ -25,8 +25,9 @@ Firewall policy (src zone -> dst zone):
     4. Trust    -> Dept B      : block ICMP
     5. Trust    -> Dept A      : allowed, unrestricted
     6. Dept A  <-> Dept B      : block ICMP both directions
-    7. non-IP traffic (e.g. ARP): flood within the source zone
-    8. everything else: forward
+    7. Data Center -> Trust/Untrust : block ALL IP
+    8. non-IP traffic (e.g. ARP): flood within the source zone
+    9. everything else: forward
 
 Note: this uses ipv4.ICMP_PROTOCOL from POX's own packet library rather
 than a hand-rolled constant, which sidesteps the classic
@@ -195,7 +196,7 @@ class ZoneRouter(object):
         elif packet.type == ethernet.IP_TYPE:
             self._handle_ip(event, packet, dpid, in_port)
         else:
-            # Rule 7: flood any other non-IP traffic within the source zone.
+            # Rule 8: flood any other non-IP traffic within the source zone.
             self._flood_in_zone(event, dpid, in_port)
 
     def _handle_transit(self, event, packet, dpid, in_port):

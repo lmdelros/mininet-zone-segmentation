@@ -49,6 +49,10 @@ ZONES = {
 BLOCK_ALL_IP = {
     ('Untrust', 'DataCenter'),
     ('Trust', 'DataCenter'),
+    # The data center can't start connections to either outside zone,
+    # so the LLM server stays isolated from them in both directions.
+    ('DataCenter', 'Trust'),
+    ('DataCenter', 'Untrust'),
 }
 
 BLOCK_ICMP = {

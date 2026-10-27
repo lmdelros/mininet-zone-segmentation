@@ -42,8 +42,8 @@ EXPECTED_POLICY = {
     ('DataCenter', 'DeptA'):      (True,  True),
     ('DataCenter', 'DeptB'):      (True,  True),
     ('DataCenter', 'DataCenter'): (True,  True),
-    ('DataCenter', 'Trust'):      (True,  True),
-    ('DataCenter', 'Untrust'):    (True,  True),
+    ('DataCenter', 'Trust'):      (False, False),  # rule 7
+    ('DataCenter', 'Untrust'):    (False, False),  # rule 7
 
     ('Trust', 'DeptA'):           (True,  True),   # rule 5
     ('Trust', 'DeptB'):           (True,  False),  # rule 4
@@ -125,12 +125,14 @@ def test_policy_matrix(pair, expected):
     assert firewall_allowed(src, dst, is_icmp=True) == icmp_allowed
 
 
-@pytest.mark.parametrize('src', ['Trust', 'Untrust'])
-def test_llm_server_unreachable_from_outside(src):
-    """The README's headline guarantee: the data center is fully
-    isolated from both external zones, for every protocol."""
-    assert not firewall_allowed(src, 'DataCenter', is_icmp=False)
-    assert not firewall_allowed(src, 'DataCenter', is_icmp=True)
+@pytest.mark.parametrize('outside', ['Trust', 'Untrust'])
+@pytest.mark.parametrize('is_icmp', [False, True])
+def test_llm_server_isolated_from_outside(outside, is_icmp):
+    """The README's headline guarantee: the data center and the
+    external zones can't start traffic to each other in either
+    direction, for any protocol."""
+    assert not firewall_allowed(outside, 'DataCenter', is_icmp)
+    assert not firewall_allowed('DataCenter', outside, is_icmp)
 
 
 @pytest.mark.parametrize('zone', ZONES)

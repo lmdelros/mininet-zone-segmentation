@@ -102,7 +102,7 @@ It also means the C++ daemon, which only sees IP addresses, always receives a so
 The firewall judges each packet on its own, with no memory of earlier packets. A ping or TCP connection works only if **both directions** are allowed. The live test's reachability matrix shows the effect:
 
 - Dept B → Trust ICMP is allowed, but the echo reply (Trust → Dept B ICMP) is blocked by rule 4, so Dept B can't ping Trust.
-- The data center can't open connections to either external zone, because the replies are blocked by rules 1 and 3.
+- Dept A → Untrust ICMP is allowed, but the echo reply (Untrust → Dept A ICMP) is blocked by rule 2, so Dept A can't ping Untrust.
 
 A stateful firewall with connection tracking would let replies to allowed connections back in. It's on the roadmap.
 

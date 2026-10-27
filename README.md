@@ -53,8 +53,9 @@ Here, the switches send any packet they don't have a rule for to the controller 
 | 4 | Trust | Dept B | Block ICMP |
 | 5 | Trust | Dept A | Allow everything |
 | 6 | Dept A | Dept B, both directions | Block ICMP |
-| 7 | Any host | Same zone, non-IP (e.g. ARP) | Flood within the zone |
-| 8 | Any host | Anything else between known zones | Allow and route |
+| 7 | Data center | Trust, Untrust | Block all IP traffic |
+| 8 | Any host | Same zone, non-IP (e.g. ARP) | Flood within the zone |
+| 9 | Any host | Anything else between known zones | Allow and route |
 
 Traffic to or from an address outside all five subnets is denied before any of these rules apply.
 

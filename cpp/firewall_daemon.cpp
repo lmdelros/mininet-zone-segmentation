@@ -110,6 +110,8 @@ const SubnetZone kZones[] = {
 const std::pair<Zone, Zone> kBlockAllIp[] = {
     {Zone::Untrust, Zone::DataCenter},
     {Zone::Trust, Zone::DataCenter},
+    {Zone::DataCenter, Zone::Trust},
+    {Zone::DataCenter, Zone::Untrust},
 };
 
 const std::pair<Zone, Zone> kBlockIcmp[] = {
