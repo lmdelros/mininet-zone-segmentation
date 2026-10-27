@@ -46,6 +46,7 @@ queues the pending packet, and retries a few times before giving up.
 
 from pox.core import core
 import pox.openflow.libopenflow_01 as of
+import pox.openflow.nicira as nx
 from pox.lib.addresses import EthAddr, IPAddr
 from pox.lib.packet.ethernet import ethernet, ETHER_BROADCAST
 from pox.lib.packet.arp import arp
@@ -98,6 +99,13 @@ CORE_PORT_ZONES = {
 ZONE_CORE_PORTS = {}
 for _port, _zone in CORE_PORT_ZONES.items():
     ZONE_CORE_PORTS.setdefault(_zone, []).append(_port)
+
+# Routed connections get switch flow rules after their first packet, so
+# the rest of the connection skips the controller. The idle timeout
+# clears rules for finished connections; the hard timeout sends even a
+# long-lived connection back through the firewall once a minute.
+ROUTED_FLOW_IDLE_TIMEOUT = 30  # seconds
+ROUTED_FLOW_HARD_TIMEOUT = 60
 
 ARP_RETRY_INTERVAL = 1  # seconds
 ARP_MAX_RETRIES = 3
@@ -325,10 +333,51 @@ class ZoneRouter(object):
         loc = self.ip_to_loc.get(ip_pkt.dstip)
         if loc is not None:
             out_port, dst_mac, _zone = loc
+            if ip_pkt.ttl > 1:
+                self._install_route_flows(event, dst_zone, out_port, dst_mac)
             self._forward_ip(event.dpid, event.port, dst_zone, packet, ip_pkt,
                               out_port, dst_mac)
         else:
             self._queue_and_resolve(event.dpid, event.port, packet, ip_pkt, dst_zone)
+
+    def _install_route_flows(self, event, dst_zone, out_port, dst_mac):
+        """Install switch rules so the rest of this connection is routed
+        without the controller: the core does the router hop (rewrite
+        MACs, decrement TTL, forward), and a host's leaf passes the
+        connection's packets up to the core.
+
+        Rules match the exact connection the first packet belongs to
+        (ingress port, MACs, IPs, protocol, and TCP/UDP ports or ICMP
+        type), so a spoofed packet can't ride an allowed connection's
+        rules: its source IP doesn't match, so it still comes to the
+        controller for the anti-spoofing check."""
+        core_conn = self.connections.get(CORE_DPID)
+        if core_conn is None:
+            return
+        match = of.ofp_match.from_packet(event.parsed, event.port)
+
+        # Core first, so packets sent up by the leaf rule find it there.
+        core_match = match.clone()
+        core_match.in_port = core_port_for(event.dpid, event.port)
+        msg = of.ofp_flow_mod(match=core_match,
+                              idle_timeout=ROUTED_FLOW_IDLE_TIMEOUT,
+                              hard_timeout=ROUTED_FLOW_HARD_TIMEOUT)
+        msg.actions.append(of.ofp_action_dl_addr.set_src(
+            EthAddr(ZONES[dst_zone]['gateway_mac'])))
+        msg.actions.append(of.ofp_action_dl_addr.set_dst(dst_mac))
+        # OpenFlow 1.0 has no TTL action; Open vSwitch's Nicira
+        # extension provides one.
+        msg.actions.append(nx.nx_action_dec_ttl())
+        msg.actions.append(of.ofp_action_output(port=out_port))
+        core_conn.send(msg)
+
+        if event.dpid != CORE_DPID:
+            msg = of.ofp_flow_mod(match=match,
+                                  idle_timeout=ROUTED_FLOW_IDLE_TIMEOUT,
+                                  hard_timeout=ROUTED_FLOW_HARD_TIMEOUT)
+            msg.actions.append(of.ofp_action_output(
+                port=LEAF_UPLINK_PORT[event.dpid]))
+            event.connection.send(msg)
 
     def _forward_ip(self, orig_dpid, orig_port, dst_zone, packet, ip_pkt,
                      out_port, dst_mac):

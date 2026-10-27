@@ -146,6 +146,32 @@ def test_same_zone(net, results):
         results.check(tcp_ok(net[a], net[b].IP()), '{} -> {} tcp'.format(a, b))
 
 
+def test_routed_flow_rules(net, results):
+    """After a routed connection's first packet, the core switch should
+    hold a rule that does the router hop itself."""
+    print('\n*** Routed connections get switch flow rules (h201 -> h_server)')
+    client, server = net['h201'], net['h_server']
+    pings = 5
+    out = client.cmd('ping -c {} -i 0.2 {}'.format(pings, server.IP()))
+    ttls = re.findall(r'ttl=(\d+)', out)
+    # h_server sends TTL 64; one router hop makes it 63 on every reply,
+    # including those the switches forward without the controller.
+    results.check(len(ttls) == pings and set(ttls) == {'63'},
+                  'every reply arrives with TTL decremented once',
+                  'TTLs: {}'.format(', '.join(ttls) or 'none'))
+
+    flows = net['s6'].dpctl('dump-flows')
+    rule = [line for line in flows.splitlines()
+            if 'icmp' in line and 'nw_src={}'.format(client.IP()) in line
+            and 'nw_dst={}'.format(server.IP()) in line]
+    results.check(bool(rule) and 'dec_ttl' in rule[0],
+                  'core switch has a routing rule for the connection')
+    matched = int(re.search(r'n_packets=(\d+)', rule[0]).group(1)) if rule else 0
+    results.check(matched >= pings - 1,
+                  'switch forwarded the later packets itself',
+                  '{} packets matched the rule'.format(matched))
+
+
 def test_ip_spoofing(net, results):
     """h_untrust forges a Trust source IP to dodge rule 2: Trust may ping
     Dept A, Untrust may not."""
@@ -192,8 +218,11 @@ def test_arp_spoofing(net, results, pox_log):
         ZONES['DeptA']['gateway']))
     time.sleep(0.5)
 
-    results.check(ping_ok(client, server.IP()),
-                  'after: h201 still reaches the real h_server')
+    # A new TCP connection (fresh source port), not another ping: later
+    # pings would match the flow rule the first one installed and never
+    # consult the controller's host table this attack tries to poison.
+    results.check(tcp_ok(client, server.IP()),
+                  'after: a new h201 connection still reaches the real h_server')
     if os.path.exists(pox_log):
         with open(pox_log) as f:
             logged = 'DROP spoofed ARP' in f.read()
@@ -244,6 +273,7 @@ def main():
 
         matrix = test_policy_matrix(net, results)
         test_same_zone(net, results)
+        test_routed_flow_rules(net, results)
         test_ip_spoofing(net, results)
         test_arp_spoofing(net, results, args.pox_log)
         print_matrix(matrix)
