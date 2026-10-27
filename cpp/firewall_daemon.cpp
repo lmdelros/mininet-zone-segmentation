@@ -71,7 +71,7 @@ constexpr uint8_t kRuleBlockIcmp = 2;   // matched BLOCK_ICMP
 
 constexpr uint8_t kIpprotoIcmp = 1;
 
-const char* kSocketPath = "/tmp/zone_firewall.sock";
+const char* kDefaultSocketPath = "/tmp/zone_firewall.sock";
 
 // ---------------------------------------------------------------------
 // Zone/subnet tables -- mirrors ZONES in firewall_rules.py.
@@ -212,13 +212,17 @@ void HandleSignal(int) { g_shutdown_requested = 1; }
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // Optional argv[1] overrides the socket path (the test suite uses this
+    // to run a private daemon without clobbering one already running).
+    const char* socket_path = argc > 1 ? argv[1] : kDefaultSocketPath;
+
     std::signal(SIGINT, HandleSignal);
     std::signal(SIGTERM, HandleSignal);
 
     // A stale socket file from a previous (crashed) run would otherwise
     // make bind() fail with EADDRINUSE.
-    unlink(kSocketPath);
+    unlink(socket_path);
 
     int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (listen_fd < 0) {
@@ -229,7 +233,7 @@ int main() {
     sockaddr_un addr;
     std::memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    std::strncpy(addr.sun_path, kSocketPath, sizeof(addr.sun_path) - 1);
+    std::strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
 
     if (bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         perror("bind");
@@ -243,7 +247,7 @@ int main() {
         return 1;
     }
 
-    std::fprintf(stderr, "zone firewall daemon listening on %s\n", kSocketPath);
+    std::fprintf(stderr, "zone firewall daemon listening on %s\n", socket_path);
 
     while (!g_shutdown_requested) {
         int client_fd = accept(listen_fd, nullptr, nullptr);
@@ -259,7 +263,7 @@ int main() {
     }
 
     close(listen_fd);
-    unlink(kSocketPath);
+    unlink(socket_path);
     std::fprintf(stderr, "zone firewall daemon shut down\n");
     return 0;
 }
