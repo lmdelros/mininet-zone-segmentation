@@ -3,6 +3,7 @@
 This document explains how the controller routes and filters traffic, why the firewall decision runs in a separate C++ process, what the benchmark measured, and which bugs the tests found. For setup and usage, see the [README](../README.md).
 
 - [How a packet gets routed](#how-a-packet-gets-routed)
+- [Flow rules for routed traffic](#flow-rules-for-routed-traffic)
 - [Firewall backends](#firewall-backends)
 - [Wire protocol](#wire-protocol)
 - [Anti-spoofing](#anti-spoofing)
@@ -17,13 +18,41 @@ The network has no real router. Every host's default gateway (for example `10.1.
 1. **ARP.** Before a host's first packet to another zone, it asks "who has `10.1.1.1`?" The question reaches the controller as an OpenFlow *packet-in*, and the controller answers with a made-up gateway MAC address. The controller also records where that host lives.
 2. **Packet-in on the host's own switch.** The host sends its packet to the gateway MAC. The host's switch has no rule for it, so it hands the packet to the controller.
 3. **Checks.** The controller works out the source zone from the switch port the packet arrived on, drops the packet if its source IP doesn't belong to that zone ([anti-spoofing](#anti-spoofing)), and asks the firewall whether this zone pair and protocol is allowed.
-4. **Routing.** If allowed, the controller decrements the TTL, rewrites the MAC addresses like a real router hop, and injects the packet at the core switch (`s6`) out the port that leads to the destination.
+4. **Routing.** If allowed, the controller decrements the TTL, rewrites the MAC addresses like a real router hop, and injects the packet at the core switch (`s6`) out the port that leads to the destination. It also installs switch rules so the rest of the connection skips steps 2–4 ([below](#flow-rules-for-routed-traffic)).
 
 Host locations are stored as *core switch ports*, because routed packets always leave from the core. A host behind leaf switch `s5` is recorded as "core port 5". If the controller doesn't know where a destination is yet, it sends ARP probes into the destination zone, queues the packet, and replies with an ICMP Host Unreachable error after three failed attempts.
 
 Packets that arrive on a leaf switch's uplink were put there by the controller or by the core's same-zone forwarding. They have already been checked at their real ingress, so they're delivered as plain layer-2 transit: no zone checks and no location learning.
 
 Traffic within one zone is forwarded at layer 2. The controller installs an OpenFlow flow rule so later packets of that flow stay in the switch.
+
+## Flow rules for routed traffic
+
+Without switch rules, every routed packet would make the trip in steps 2–4: switch to controller, a firewall round trip to the C++ daemon, and back out. The controller is a single Python process, so it caps throughput.
+
+When the controller allows a routed packet, it installs two OpenFlow rules for that packet's connection:
+
+- **Core switch:** rewrite the source MAC to the destination zone's gateway and the destination MAC to the destination host, decrement the TTL, and send the packet out the port toward the destination. OpenFlow 1.0 has no TTL action, so this uses Open vSwitch's Nicira `dec_ttl` extension.
+- **Sender's leaf switch** (when the sender isn't directly on the core): send the connection's packets up the uplink to the core.
+
+The destination's leaf already gets a rule from the transit handling described above.
+
+Each rule matches the exact connection: ingress port, MAC addresses, IP addresses, protocol, and TCP/UDP ports or ICMP type. A spoofed packet carries a different source IP, so it doesn't match an allowed connection's rules and still reaches the controller's anti-spoofing check. Rules expire after 30 seconds idle or 60 seconds total, so even a long-lived connection goes back through the firewall once a minute.
+
+The live test checks the result directly: the core holds a rule with `dec_ttl` for a routed connection, that rule's packet counter shows the switch forwarded later packets itself, and every ping reply arrives with TTL 63 (sent as 64, one router hop).
+
+**Results.** [`integration/perf_test.py`](../integration/perf_test.py) measures `h201 → h_server` (routed) and `h101 → h103` (same zone, across the core). Both paths cross three switches. Each row is one run in Docker on WSL 2, with throughput as the median of three 10-second iperf3 runs and latency as the average of 20 pings:
+
+| Run | Routed throughput | Same-zone throughput | Routed as % of same zone | Routed ping avg |
+|---|---|---|---|---|
+| Before, run 1 | 14.9 Mbit/s | 425 Mbit/s | 3.5% | 9.6 ms |
+| Before, run 2 | 18.7 Mbit/s | 221 Mbit/s | 8.5% | 9.1 ms |
+| After, run 1 | 616 Mbit/s | 618 Mbit/s | 100% | 2.5 ms |
+| After, run 2 | 199 Mbit/s | 214 Mbit/s | 93% | 0.9 ms |
+
+Absolute throughput swings between runs on this machine (same-zone traffic, whose code didn't change, ranged from 214 to 618 Mbit/s), so the fair comparison is routed vs. same-zone within a run. Routed traffic went from 4–9% of same-zone throughput to 93–100%. In the two runs with similar conditions (same-zone about 215–220 Mbit/s), routed throughput went from 18.7 to 199 Mbit/s, about 11x. Worst-case routed ping dropped from 38–48 ms to 3–5 ms.
+
+Blocked traffic doesn't get rules yet, so each blocked packet still goes to the controller.
 
 ## Firewall backends
 

@@ -30,17 +30,18 @@ flowchart TB
 
 ## Highlights
 
-- **The controller is the router and the firewall.** There's no firewall appliance and no static switch rules: a custom [POX](https://github.com/noxrepo/pox) controller answers ARP for every zone's gateway, routes between zones, and enforces the access policy on each packet.
+- **The controller is the router and the firewall.** There's no firewall appliance and no static switch rules: a custom [POX](https://github.com/noxrepo/pox) controller answers ARP for every zone's gateway, routes between zones, and enforces the access policy.
+- **Routed traffic at switch speed.** After the controller allows a connection's first packet, it installs OpenFlow rules so the switches route the rest of the connection themselves, including the TTL decrement. Routed throughput went from 4–9% of same-zone throughput to 93–100% (18.7 → 199 Mbit/s in comparable runs), and average ping dropped from about 9 ms to 1–2.5 ms.
 - **Blocks IP and ARP spoofing.** A packet's zone comes from the switch port it arrived on, which a host can't fake, and packets whose source IP doesn't match that zone are dropped.
 - **Policy decisions in C++.** A standalone C++ daemon makes the allow/deny decision over a 13-byte binary protocol on a Unix socket, with the Python implementation as a fallback.
-- **Tested with real traffic.** A Docker-based live test sends pings and TCP connections between every pair of zones and runs both spoofing attacks (52 checks). 256 unit tests cover the rules, the wire protocol, and agreement between the Python and C++ implementations. Everything runs in CI on every push.
+- **Tested with real traffic.** A Docker-based live test sends pings and TCP connections between every pair of zones, checks the switch rules for routed traffic, and runs both spoofing attacks (55 checks). 256 unit tests cover the rules, the wire protocol, and agreement between the Python and C++ implementations. Everything runs in CI on every push.
 - **Measured honestly.** The benchmark shows the C++ daemon is 5–11x *slower* per decision than in-process Python for this small rule set, and the [design notes](docs/design.md#benchmark-c-daemon-vs-in-process-python) explain why.
 
 ## Overview
 
 The network models a small company with two office floors (Dept A and Dept B), a data center that hosts an LLM server, and two outside zones: a trusted partner network and an untrusted one. Each zone has its own subnet. In [software-defined networking (SDN)](https://en.wikipedia.org/wiki/Software-defined_networking), switches forward packets but a central controller decides what they do, so all routing and filtering logic lives in one program instead of being configured on each device.
 
-Here, the switches send any packet they don't have a rule for to the controller over [OpenFlow](https://en.wikipedia.org/wiki/OpenFlow). The controller works out which zone the packet came from and where it's going, asks the firewall whether that's allowed, and either drops it or routes it to the destination like a real router hop. The goal is to show zone segmentation, the practice of splitting a network so that a compromised machine in one zone can't reach everything else, with the most sensitive system (the LLM server) fully isolated from both outside zones.
+Here, the switches send any packet they don't have a rule for to the controller over [OpenFlow](https://en.wikipedia.org/wiki/OpenFlow). The controller works out which zone the packet came from and where it's going, asks the firewall whether that's allowed, and either drops it or routes it to the destination like a real router hop. For an allowed connection, it also installs rules on the switches, so the rest of that connection's packets are routed without the controller. The goal is to show zone segmentation, the practice of splitting a network so that a compromised machine in one zone can't reach everything else, with the most sensitive system (the LLM server) fully isolated from both outside zones.
 
 ### Access policy
 
@@ -115,13 +116,17 @@ Each check prints `PASS` or `FAIL`, followed by the measured reachability betwee
   [PASS] h101      -> h201      tcp  allowed
   [PASS] h_untrust -> h_server  tcp  blocked
   ...
+*** Routed connections get switch flow rules (h201 -> h_server)
+  [PASS] every reply arrives with TTL decremented once  (TTLs: 63, 63, 63, 63, 63)
+  [PASS] core switch has a routing rule for the connection
+  [PASS] switch forwarded the later packets itself  (5 packets matched the rule)
 *** IP spoofing: h_untrust forges a Trust source IP toward h101
   [PASS] control: honest Trust ping reaches h101
   [PASS] attacker emitted spoofed packets  (3 sent)
   [PASS] none reached h101  (0 received)
 *** ARP spoofing: h101 claims h_server's IP
   [PASS] before: h201 reaches h_server
-  [PASS] after: h201 still reaches the real h_server
+  [PASS] after: a new h201 connection still reaches the real h_server
   [PASS] controller logged the spoofed ARP drop
 ...
 *** ALL CHECKS PASSED
@@ -218,9 +223,17 @@ sudo python3 integration/live_test.py
 
 [GitHub Actions](https://github.com/lmdelros/mininet-zone-segmentation/actions/workflows/ci.yml) runs both on every push to `main` and on pull requests.
 
+The performance test measures throughput (with iperf3) and ping latency for routed and same-zone traffic. It uses the same image (about 2 minutes):
+
+```bash
+docker run --rm --privileged -v "$PWD:/src:ro" -e TEST_SCRIPT=perf_test.py zone-seg-live
+```
+
+Absolute numbers depend on the machine, so compare the two paths within one run. Results are in the [design notes](docs/design.md#flow-rules-for-routed-traffic).
+
 ## Learn more
 
-[Design notes](docs/design.md) cover how routing works step by step, the C++ daemon and its wire protocol, anti-spoofing, the benchmark results, and the bugs the tests found.
+[Design notes](docs/design.md) cover how routing works step by step, the flow rules and their performance results, the C++ daemon and its wire protocol, anti-spoofing, the benchmark results, and the bugs the tests found.
 
 ## Project structure
 
@@ -233,7 +246,7 @@ sudo python3 integration/live_test.py
 ├── bench_firewall.py      # Latency benchmark: Python vs. C++ daemon
 ├── cpp/                   # C++ firewall daemon and Makefile
 ├── tests/                 # pytest unit tests
-├── integration/           # Live Mininet test
+├── integration/           # Live Mininet test and performance test
 ├── docker/                # Test image and its startup script
 └── docs/design.md         # Design notes
 ```
@@ -241,7 +254,7 @@ sudo python3 integration/live_test.py
 ## Roadmap and known limitations
 
 - **Stateless firewall:** replies to allowed connections can be blocked (see above). Next step: connection tracking.
-- **Every routed packet goes through the controller.** Only same-zone traffic gets switch flow rules today. Installing rules for allowed cross-zone flows would keep later packets in the switches.
+- **Blocked traffic still reaches the controller packet by packet.** Only allowed connections get switch rules. Drop rules for denied connections would keep a flood of blocked packets off the controller.
 - **Policy is hard-coded in two places,** Python and C++, kept in sync by tests. Moving it into one config file would remove the duplication.
 - **Switch port numbers are hard-coded** in `controller.py` to match `topology.py`'s link order, so changing the topology means updating both.
 - Logging and metrics for rule hits and drop counts.
