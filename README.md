@@ -81,6 +81,7 @@ Times the same decision (raw src/dst IP + protocol → allow/deny) end-to-end on
 ├── firewall_rules.py     # Pure Python zone/firewall rule logic (no POX dependency)
 ├── firewall_client.py     # Python client for the C++ firewall daemon (Unix domain socket)
 ├── bench_firewall.py       # Latency benchmark: Python in-process vs. C++ daemon
+├── tests/                  # pytest suite (rules, wire protocol, Python/C++ parity)
 ├── cpp/
 │   ├── firewall_daemon.cpp  # Standalone C++ firewall daemon
 │   └── Makefile
@@ -117,12 +118,25 @@ Requires Mininet, Open vSwitch, and a Python-3-compatible build of POX (this pro
 
 ## Testing & Verification
 
-Not yet run end-to-end in Mininet — `topology.py` and `controller.py` are written and pass a static syntax check, but haven't been exercised in a live environment. Once that happens, each policy rule above should be verified via `ping`/`pingall` from the Mininet CLI in both directions per zone pair. Planned follow-up: replace manual verification with an automated test script that drives Mininet's Python API directly and asserts expected pass/fail results per zone.
+```bash
+pip install pytest
+pytest            # from the repo root
+```
+
+The suite (`tests/`) has three layers:
+
+- **`test_firewall_rules.py`**: the full 5×5 zone policy matrix (ICMP and non-ICMP), typed out by hand from the policy table above rather than read from the code's own rule tables, so a wrong rule entry fails the test. Also covers subnet boundaries, non-overlapping subnets, and the headline guarantee that the LLM server is unreachable from both external zones.
+- **`test_firewall_client.py`**: the binary wire protocol, using an in-memory socketpair as a fake daemon. Checks exact request bytes, response parsing, short reads, and reconnecting after the daemon drops.
+- **`test_daemon_parity.py`**: compiles the C++ daemon, runs it on a private socket, and asserts it agrees with the Python implementation (verdict and rule id) for every zone pair × ICMP/TCP/UDP, plus concurrent clients and malformed requests. Linux + g++ only; skipped elsewhere.
+
+The parity tests already found one real bug: the daemon ignored SIGINT/SIGTERM because glibc's `signal()` sets `SA_RESTART`, which silently restarts the blocked `accept()`. It now uses `sigaction` without that flag.
+
+Not yet tested: end-to-end behavior in a live Mininet network. Planned follow-up is an automated script that drives Mininet's Python API and asserts the expected pass/fail result per zone pair.
 
 ## Roadmap
 
 - Move firewall rules into a config file (YAML/JSON) instead of hardcoded IPs
-- Automated test suite (see Testing & Verification above)
+- Automated Mininet integration test (see Testing & Verification above)
 - Logging/metrics for rule hits and drop counts
 - Containerize the environment (Docker/Vagrant) for reproducibility
 - Second core switch for redundancy; NAT for external hosts
