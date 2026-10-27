@@ -50,7 +50,7 @@ from pox.lib.addresses import EthAddr, IPAddr
 from pox.lib.packet.ethernet import ethernet, ETHER_BROADCAST
 from pox.lib.packet.arp import arp
 from pox.lib.packet.ipv4 import ipv4
-from pox.lib.packet.icmp import icmp
+from pox.lib.packet.icmp import icmp, unreach
 from pox.lib.recoco import Timer
 
 from firewall_rules import ZONES, zone_for_ip, firewall_allowed
@@ -378,8 +378,14 @@ class ZoneRouter(object):
         err = icmp()
         err.type = icmp_type
         err.code = icmp_code
-        # RFC 792: original IP header + first 8 bytes of its payload.
-        err.payload = ip_pkt.pack()[:28]
+        # RFC 792: 4 unused bytes, then the original IP header + first 8
+        # bytes of its payload. POX's icmp only packs type/code/checksum,
+        # so the unused word has to come from an unreach body (its layout
+        # is the same for Time Exceeded) -- raw bytes here would shift the
+        # quoted header 4 bytes early and receivers couldn't parse it.
+        body = unreach()
+        body.payload = ip_pkt.pack()[:28]
+        err.payload = body
 
         reply_ip = ipv4()
         reply_ip.protocol = ipv4.ICMP_PROTOCOL
