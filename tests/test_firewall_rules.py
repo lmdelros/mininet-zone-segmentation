@@ -138,12 +138,27 @@ def test_same_zone_traffic_always_allowed(zone):
     assert firewall_allowed(zone, zone, is_icmp=True)
 
 
-def test_unknown_zone_is_default_allow():
-    # Documents current behavior: an address outside every subnet
-    # (zone None) matches no block rule and is allowed. If the policy
-    # moves to default-deny, this test should flip.
-    assert firewall_allowed(None, 'DataCenter', is_icmp=False)
-    assert firewall_allowed('DeptA', None, is_icmp=True)
+@pytest.mark.parametrize('zone', ZONES)
+@pytest.mark.parametrize('is_icmp', [False, True])
+def test_unknown_zone_is_default_deny(zone, is_icmp):
+    # An address outside every subnet (zone None) is denied in both
+    # directions, even toward zones that are otherwise wide open.
+    assert not firewall_allowed(None, zone, is_icmp)
+    assert not firewall_allowed(zone, None, is_icmp)
+    assert not firewall_allowed(None, None, is_icmp)
+
+
+def test_unrecognized_zone_name_is_denied():
+    # Guards against a typo'd zone name slipping through as "no rule
+    # matched, so allow".
+    assert not firewall_allowed('DeptC', 'DeptA', is_icmp=False)
+
+
+@pytest.mark.parametrize('ip', ['8.8.8.8', '10.1.4.1', '172.16.0.1'])
+def test_unknown_ip_denied_end_to_end(ip):
+    for dst in HOSTS.values():
+        assert not firewall_allowed(zone_for_ip(ip), zone_for_ip(dst), is_icmp=False)
+        assert not firewall_allowed(zone_for_ip(dst), zone_for_ip(ip), is_icmp=False)
 
 
 # -- end to end: raw IPs -> verdict (what bench_firewall.py times) -------

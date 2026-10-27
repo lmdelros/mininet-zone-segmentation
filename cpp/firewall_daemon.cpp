@@ -68,6 +68,7 @@ static_assert(sizeof(FilterResponse) == 2, "wire format drifted");
 constexpr uint8_t kRuleNone = 0;        // default allow, no rule matched
 constexpr uint8_t kRuleBlockAllIp = 1;  // matched BLOCK_ALL_IP
 constexpr uint8_t kRuleBlockIcmp = 2;   // matched BLOCK_ICMP
+constexpr uint8_t kRuleUnknownZone = 3; // src or dst outside every known zone
 
 constexpr uint8_t kIpprotoIcmp = 1;
 
@@ -138,10 +139,14 @@ Zone ClassifyZone(uint32_t ip_host_order) {
     return Zone::Unknown;
 }
 
-// Direct port of firewall_allowed() in firewall_rules.py: check the
-// "block everything" table first, then (only for ICMP) the narrower
-// "block ICMP" table. Anything left over is allowed.
+// Direct port of firewall_allowed() in firewall_rules.py: deny anything
+// outside the known zones, then check the "block everything" table,
+// then (only for ICMP) the narrower "block ICMP" table. Anything left
+// over is allowed.
 FilterResponse Decide(Zone src_zone, Zone dst_zone, bool is_icmp) {
+    if (src_zone == Zone::Unknown || dst_zone == Zone::Unknown) {
+        return {0, kRuleUnknownZone};
+    }
     if (ContainsPair(kBlockAllIp, src_zone, dst_zone)) {
         return {0, kRuleBlockAllIp};
     }

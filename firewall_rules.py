@@ -70,6 +70,11 @@ def zone_for_ip(ip):
 
 
 def firewall_allowed(src_zone, dst_zone, is_icmp):
+    # Default-deny for anything outside the known zones (zone_for_ip
+    # returns None): an address the policy doesn't know about can't be
+    # granted access by any rule below.
+    if src_zone not in ZONES or dst_zone not in ZONES:
+        return False
     if (src_zone, dst_zone) in BLOCK_ALL_IP:
         return False
     if is_icmp and (src_zone, dst_zone) in BLOCK_ICMP:

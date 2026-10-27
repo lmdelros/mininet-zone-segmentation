@@ -27,7 +27,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DAEMON_SRC = os.path.join(REPO_ROOT, 'cpp', 'firewall_daemon.cpp')
 
 # Must match the kRule* constants in firewall_daemon.cpp.
-RULE_NONE, RULE_BLOCK_ALL_IP, RULE_BLOCK_ICMP = 0, 1, 2
+RULE_NONE, RULE_BLOCK_ALL_IP, RULE_BLOCK_ICMP, RULE_UNKNOWN_ZONE = 0, 1, 2, 3
 
 
 @pytest.fixture(scope='module')
@@ -89,12 +89,15 @@ def test_cpp_matches_python(client, src, dst, protocol):
         assert rule_id == RULE_BLOCK_ICMP
 
 
+@pytest.mark.parametrize('protocol', PROTOCOLS)
+@pytest.mark.parametrize('zone', ZONES)
 @pytest.mark.parametrize('ip', ['8.8.8.8', '10.1.4.1'])
-def test_cpp_matches_python_for_unknown_zone(client, ip):
-    for protocol in PROTOCOLS:
-        py = firewall_allowed(zone_for_ip(ip), 'DataCenter', protocol == IPPROTO_ICMP)
-        cpp, _ = client.is_allowed(ip, _sample_ip('DataCenter'), protocol)
-        assert cpp == py
+def test_unknown_zone_denied_by_both(client, ip, zone, protocol):
+    is_icmp = protocol == IPPROTO_ICMP
+    known = _sample_ip(zone)
+    for src, dst in [(ip, known), (known, ip)]:
+        assert not firewall_allowed(zone_for_ip(src), zone_for_ip(dst), is_icmp)
+        assert client.is_allowed(src, dst, protocol) == (False, RULE_UNKNOWN_ZONE)
 
 
 def test_concurrent_clients(daemon_socket):

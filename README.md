@@ -26,6 +26,8 @@ All enforcement happens in the POX controller (`controller.py`), which inspects 
 | 7 | Any host                | Any host (non-IP, e.g. ARP) | Flood |
 | 8 | Any host                | Any host (other IP traffic) | Forward via specific port |
 
+**Default-deny for unknown addresses:** any IP traffic whose source or destination falls outside all five zone subnets is dropped before the rules above are checked. Both firewall backends enforce it (`firewall_allowed()` returns `False`; the C++ daemon replies DENY with rule id `3`), and the controller logs each drop. Rule 8's "forward" only applies between known zones.
+
 The intent: the LLM server is the crown jewel and is fully isolated from both trust boundaries; the untrusted zone gets the least access of any zone; departments can be segmented from each other (ICMP block) without cutting off legitimate IP traffic needed for real services.
 
 ## C++ Firewall Daemon

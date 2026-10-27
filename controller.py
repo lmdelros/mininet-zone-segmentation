@@ -243,7 +243,10 @@ class ZoneRouter(object):
 
         dst_zone = zone_for_ip(ip_pkt.dstip)
         if dst_zone is None:
-            return  # destination outside every known zone
+            # Default-deny: destination outside every known zone.
+            log.info("DROP %s -> unknown zone: %s -> %s", src_zone,
+                      ip_pkt.srcip, ip_pkt.dstip)
+            return
 
         is_icmp = ip_pkt.protocol == ipv4.ICMP_PROTOCOL
 
