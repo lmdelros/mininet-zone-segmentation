@@ -2,17 +2,21 @@
 """POX controller: router + firewall for the zone-segmentation network.
 
 Topology recap (see topology.py): switches s1-s5 each serve exactly one
-zone/subnet (s1+s2 = Dept A, s3+s4 = Dept B, s5 = Data Center), so they
-never need to make a routing decision -- every port on those switches is
-the same zone, and they behave as plain learning switches. s6 (the core)
-is the only switch that touches more than one zone (both floor pairs,
-the data center, and the two external hosts wired straight to it), so
-it's the only place a packet's source zone and destination zone can ever
-differ. That's where this controller does its work: it owns the virtual
-gateway IP for every zone (answering ARP on their behalf, since no real
-host holds those addresses), enforces the 8 firewall rules below when a
-packet crosses a zone boundary, and otherwise routes it -- decrementing
-TTL and rewriting MACs like a real router hop.
+zone/subnet (s1+s2 = Dept A, s3+s4 = Dept B, s5 = Data Center), and s6
+(the core) connects them plus the two external hosts. The controller
+owns the virtual gateway IP for every zone (answering ARP on their
+behalf, since no real host holds those addresses). When a host sends a
+packet to its gateway, the controller sees it as a packet-in on the
+host's own switch, enforces the 8 firewall rules below, and routes it
+-- decrementing TTL and rewriting MACs like a real router hop -- by
+injecting it at the core switch out the port toward the destination.
+
+Leaf uplinks: a packet arriving on a leaf switch's port to the core was
+put there by the controller (a routed packet or an ARP probe) or by the
+core's own intra-zone L2 forwarding, so it has already been firewalled
+at its real ingress. Those packets are delivered as plain L2 transit,
+without re-running the zone checks or learning host locations from
+them (see _handle_transit).
 
 Firewall policy (src zone -> dst zone):
     1. Untrust  -> Data Center : block ALL IP
@@ -31,12 +35,13 @@ version of this project.
 
 Host discovery: a host's IP/MAC/location is learned the moment it ARPs
 for its zone's gateway (which every host must do before its first
-cross-zone packet), so by the time a routed packet needs to reach it,
-the core switch already knows which port it's behind. The exception is
-a host that receives inbound traffic before ever transmitting anything
-(e.g. an unsolicited connection to h_server) -- for that case the router
-actively ARPs into the destination zone, queues the pending packet, and
-retries a few times before giving up.
+cross-zone packet). Locations are stored as the *core* port the host is
+reached through (for a host behind a leaf, the core port facing that
+leaf), since routed packets are always injected at the core. The
+exception is a host that receives inbound traffic before ever
+transmitting anything (e.g. an unsolicited connection to h_server) --
+for that case the router actively ARPs into the destination zone,
+queues the pending packet, and retries a few times before giving up.
 """
 
 from pox.core import core
@@ -71,6 +76,12 @@ SWITCH_ZONE = {
     5: 'DataCenter',
 }
 
+# Each leaf's uplink port, and the core port at the other end of that
+# link (addLink order again: s1-s4 have two hosts then the uplink on
+# port 3; s5 has one host then the uplink on port 2).
+LEAF_UPLINK_PORT = {1: 3, 2: 3, 3: 3, 4: 3, 5: 2}
+LEAF_CORE_PORT = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
+
 # Core switch (dpid 6): zone depends on which port, per the link order in
 # topology.py (addLink order -> port number): s1, s2, s3, s4, s5,
 # h_trust, h_untrust.
@@ -102,12 +113,25 @@ def zone_of_port(dpid, port):
     return SWITCH_ZONE.get(dpid)
 
 
+def is_leaf_uplink(dpid, port):
+    return LEAF_UPLINK_PORT.get(dpid) == port
+
+
+def core_port_for(dpid, port):
+    """The core-switch port that a host seen at (dpid, port) is reached
+    through: the port itself at the core, else the core port facing
+    that leaf."""
+    if dpid == CORE_DPID:
+        return port
+    return LEAF_CORE_PORT.get(dpid)
+
+
 class ZoneRouter(object):
 
     def __init__(self):
         self.connections = {}          # dpid -> Connection
         self.mac_table = {}            # dpid -> {mac: port}
-        self.ip_to_loc = {}            # ip -> (dpid, port, mac, zone)
+        self.ip_to_loc = {}            # ip -> (core_port, mac, zone)
         self.pending = {}              # ip -> {zone, queue, retries, timer}
         self._fw_client = FirewallClient() if USE_CPP_FIREWALL else None
         self._fw_fallback_warned = False
@@ -155,13 +179,28 @@ class ZoneRouter(object):
 
         if packet.type == ethernet.LLDP_TYPE:
             return
-        if packet.type == ethernet.ARP_TYPE:
+        if is_leaf_uplink(dpid, in_port):
+            self._handle_transit(event, packet, dpid, in_port)
+        elif packet.type == ethernet.ARP_TYPE:
             self._handle_arp(event, packet, dpid, in_port)
         elif packet.type == ethernet.IP_TYPE:
             self._handle_ip(event, packet, dpid, in_port)
         else:
             # Rule 7: flood any other non-IP traffic within the source zone.
             self._flood_in_zone(event, dpid, in_port)
+
+    def _handle_transit(self, event, packet, dpid, in_port):
+        """A packet coming down a leaf's uplink from the core: already
+        firewalled at its real ingress (see module docstring). Its
+        source host isn't behind this leaf, so learning its location
+        here would send that host's traffic to the wrong core port, and
+        re-running the zone checks would misread it as coming from this
+        leaf's zone. Learn only the MAC and deliver it at L2."""
+        self.mac_table.setdefault(dpid, {})[packet.src] = in_port
+        if packet.dst.is_multicast:
+            self._flood_in_zone(event, dpid, in_port)
+        else:
+            self._l2_forward(event, dpid, in_port, packet.dst)
 
     # -- ARP handling --------------------------------------------------
 
@@ -264,8 +303,8 @@ class ZoneRouter(object):
 
     def _route(self, event, packet, ip_pkt, dst_zone):
         loc = self.ip_to_loc.get(ip_pkt.dstip)
-        if loc is not None and loc[0] == CORE_DPID:
-            _, out_port, dst_mac, _zone = loc
+        if loc is not None:
+            out_port, dst_mac, _zone = loc
             self._forward_ip(event.dpid, event.port, dst_zone, packet, ip_pkt,
                               out_port, dst_mac)
         else:
@@ -319,7 +358,7 @@ class ZoneRouter(object):
             return
         if entry['timer']:
             entry['timer'].cancel()
-        out_port = self.ip_to_loc[ip][1]
+        out_port = self.ip_to_loc[ip][0]
         for (orig_dpid, orig_port, packet, ip_pkt) in entry['queue']:
             self._forward_ip(orig_dpid, orig_port, entry['zone'], packet, ip_pkt,
                               out_port, mac)
@@ -356,7 +395,9 @@ class ZoneRouter(object):
 
     def _learn(self, dpid, port, ip, mac, zone):
         self.mac_table.setdefault(dpid, {})[mac] = port
-        self.ip_to_loc[ip] = (dpid, port, mac, zone)
+        core_port = core_port_for(dpid, port)
+        if core_port is not None:
+            self.ip_to_loc[ip] = (core_port, mac, zone)
 
     def _l2_forward(self, event, dpid, in_port, dst_mac):
         out_port = self.mac_table.get(dpid, {}).get(dst_mac)
