@@ -29,6 +29,11 @@ Firewall policy (src zone -> dst zone):
     8. non-IP traffic (e.g. ARP): flood within the source zone
     9. everything else: forward
 
+The firewall is stateful: the rules above decide who may *start* a
+connection, and conntrack.py remembers allowed connections so their
+replies get through even when the rules block that direction (e.g.
+the echo reply to a Dept B -> Trust ping, despite rule 4).
+
 Note: this uses ipv4.ICMP_PROTOCOL from POX's own packet library rather
 than a hand-rolled constant, which sidesteps the classic
 "ICMP_PROTOCOL vs CMP_PROTOCOL" typo bug from the original coursework
@@ -55,6 +60,7 @@ from pox.lib.packet.ipv4 import ipv4
 from pox.lib.packet.icmp import icmp, unreach
 from pox.lib.recoco import Timer
 
+import conntrack
 from firewall_rules import (ZONES, zone_for_ip, firewall_allowed,
                             source_ip_valid_for_zone)
 from firewall_client import FirewallClient, IPPROTO_ICMP
@@ -108,6 +114,8 @@ for _port, _zone in CORE_PORT_ZONES.items():
 ROUTED_FLOW_IDLE_TIMEOUT = 30  # seconds
 ROUTED_FLOW_HARD_TIMEOUT = 60
 
+CONN_EXPIRE_INTERVAL = 30  # seconds between sweeps of idle connections
+
 ARP_RETRY_INTERVAL = 1  # seconds
 ARP_MAX_RETRIES = 3
 
@@ -145,6 +153,9 @@ class ZoneRouter(object):
         self.pending = {}              # ip -> {zone, queue, retries, timer}
         self._fw_client = FirewallClient() if USE_CPP_FIREWALL else None
         self._fw_fallback_warned = False
+        self.conns = conntrack.ConnectionTable()
+        # Lookups check expiry themselves; this only frees memory.
+        Timer(CONN_EXPIRE_INTERVAL, self.conns.expire, recurring=True)
         core.openflow.addListeners(self)
         log.info("Zone-segmentation router/firewall started (firewall backend: %s)",
                   "C++ daemon" if USE_CPP_FIREWALL else "Python")
@@ -323,12 +334,34 @@ class ZoneRouter(object):
             self._l2_forward(event, dpid, in_port, packet.dst)
             return
 
-        if not self._firewall_allowed(src_zone, dst_zone, is_icmp, ip_pkt):
+        policy_allowed = self._firewall_allowed(src_zone, dst_zone, is_icmp, ip_pkt)
+        # Stateful check: a packet the rules block still passes if it's a
+        # reply to a connection the rules allowed (see conntrack.py).
+        if self.conns.check(policy_allowed, self._tracked(ip_pkt)) is None:
             log.info("DROP %s -> %s (%s): %s -> %s", src_zone, dst_zone,
                       "ICMP" if is_icmp else "IP", ip_pkt.srcip, ip_pkt.dstip)
             return
 
         self._route(event, packet, ip_pkt, dst_zone)
+
+    @staticmethod
+    def _tracked(ip_pkt):
+        """The packet's connection-tracking description, or None if POX
+        couldn't parse its TCP/UDP/ICMP header or the kind isn't tracked."""
+        l4 = ip_pkt.payload
+        if ip_pkt.protocol in (ipv4.TCP_PROTOCOL, ipv4.UDP_PROTOCOL):
+            if not hasattr(l4, 'srcport'):
+                return None
+            return conntrack.tracked_packet(ip_pkt.srcip, ip_pkt.dstip,
+                                            ip_pkt.protocol, l4.srcport, l4.dstport)
+        if ip_pkt.protocol == ipv4.ICMP_PROTOCOL:
+            if not hasattr(l4, 'type'):
+                return None
+            echo_id = getattr(l4.payload, 'id', 0)  # set for echo request/reply
+            return conntrack.tracked_packet(ip_pkt.srcip, ip_pkt.dstip,
+                                            ip_pkt.protocol, icmp_type=l4.type,
+                                            icmp_id=echo_id)
+        return None
 
     def _route(self, event, packet, ip_pkt, dst_zone):
         loc = self.ip_to_loc.get(ip_pkt.dstip)

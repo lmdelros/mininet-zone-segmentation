@@ -13,11 +13,11 @@ Needs root and a running POX controller (with controller.py) on
     docker build -t zone-seg-live docker/
     docker run --rm --privileged -v "$PWD:/src:ro" zone-seg-live
 
-Expected verdicts come from firewall_rules.firewall_allowed(), checked
-in BOTH directions: the firewall is stateless, so a ping or TCP
-handshake only succeeds if the reply direction is allowed too (e.g.
-Dept B -> Trust ICMP is allowed, but the echo reply Trust -> Dept B is
-blocked by rule 4, so Dept B can't ping Trust).
+Expected verdicts come from firewall_rules.firewall_allowed() for the
+direction that starts the connection. The firewall is stateful, so
+replies to an allowed connection get through even where the rules
+block that direction (e.g. Dept B can ping Trust although rule 4
+blocks Trust -> Dept B ICMP).
 """
 
 import argparse
@@ -91,8 +91,8 @@ def tcp_ok(src, dst_ip):
 
 
 def expected(src, dst, is_icmp):
-    a, b = zone_for_ip(src.IP()), zone_for_ip(dst.IP())
-    return firewall_allowed(a, b, is_icmp) and firewall_allowed(b, a, is_icmp)
+    # Stateful firewall: only the starting direction has to be allowed.
+    return firewall_allowed(zone_for_ip(src.IP()), zone_for_ip(dst.IP()), is_icmp)
 
 
 class Capture(object):
@@ -144,6 +144,22 @@ def test_same_zone(net, results):
     for a, b in SAME_ZONE_PAIRS:
         results.check(ping_ok(net[a], net[b].IP()), '{} -> {} ping'.format(a, b))
         results.check(tcp_ok(net[a], net[b].IP()), '{} -> {} tcp'.format(a, b))
+
+
+def test_stateful_firewall(net, results):
+    """Replies to allowed connections pass, but tracking never lets the
+    other side start a connection the rules block."""
+    print('\n*** Stateful firewall: replies pass, reverse connections do not')
+    dept_a, dept_b = net['h101'], net['h201']
+    trust, untrust = net['h_trust'], net['h_untrust']
+    results.check(ping_ok(dept_b, trust.IP()),
+                  'h201 pings h_trust (reply passes despite rule 4)')
+    results.check(not ping_ok(trust, dept_b.IP()),
+                  'h_trust still cannot start a ping to h201')
+    results.check(ping_ok(dept_a, untrust.IP()),
+                  'h101 pings h_untrust (reply passes despite rule 2)')
+    results.check(not ping_ok(untrust, dept_a.IP()),
+                  'h_untrust still cannot start a ping to h101')
 
 
 def test_routed_flow_rules(net, results):
@@ -273,6 +289,7 @@ def main():
 
         matrix = test_policy_matrix(net, results)
         test_same_zone(net, results)
+        test_stateful_firewall(net, results)
         test_routed_flow_rules(net, results)
         test_ip_spoofing(net, results)
         test_arp_spoofing(net, results, args.pox_log)
