@@ -7,7 +7,7 @@ This document explains how the controller routes and filters traffic, why the fi
 - [Firewall backends](#firewall-backends)
 - [Wire protocol](#wire-protocol)
 - [Anti-spoofing](#anti-spoofing)
-- [Why some allowed traffic still fails: a stateless firewall](#why-some-allowed-traffic-still-fails-a-stateless-firewall)
+- [Connection tracking](#connection-tracking)
 - [Benchmark: C++ daemon vs. in-process Python](#benchmark-c-daemon-vs-in-process-python)
 - [Bugs found by testing](#bugs-found-by-testing)
 
@@ -17,7 +17,7 @@ The network has no real router. Every host's default gateway (for example `10.1.
 
 1. **ARP.** Before a host's first packet to another zone, it asks "who has `10.1.1.1`?" The question reaches the controller as an OpenFlow *packet-in*, and the controller answers with a made-up gateway MAC address. The controller also records where that host lives.
 2. **Packet-in on the host's own switch.** The host sends its packet to the gateway MAC. The host's switch has no rule for it, so it hands the packet to the controller.
-3. **Checks.** The controller works out the source zone from the switch port the packet arrived on, drops the packet if its source IP doesn't belong to that zone ([anti-spoofing](#anti-spoofing)), and asks the firewall whether this zone pair and protocol is allowed.
+3. **Checks.** The controller works out the source zone from the switch port the packet arrived on, drops the packet if its source IP doesn't belong to that zone ([anti-spoofing](#anti-spoofing)), and asks the firewall whether this zone pair and protocol is allowed. A blocked packet still passes if it's a reply to a connection the firewall allowed ([connection tracking](#connection-tracking)).
 4. **Routing.** If allowed, the controller decrements the TTL, rewrites the MAC addresses like a real router hop, and injects the packet at the core switch (`s6`) out the port that leads to the destination. It also installs switch rules so the rest of the connection skips steps 2–4 ([below](#flow-rules-for-routed-traffic)).
 
 Host locations are stored as *core switch ports*, because routed packets always leave from the core. A host behind leaf switch `s5` is recorded as "core port 5". If the controller doesn't know where a destination is yet, it sends ARP probes into the destination zone, queues the packet, and replies with an ICMP Host Unreachable error after three failed attempts.
@@ -67,6 +67,8 @@ The controller uses the daemon when `USE_CPP_FIREWALL = True` in `controller.py`
 
 Both implementations deny traffic to or from an address outside all five zone subnets, before any other rule is checked.
 
+Both give a stateless verdict for one packet. The controller layers [connection tracking](#connection-tracking) on top, so the daemon and its wire protocol didn't need to change.
+
 The rule tables are duplicated by hand in the two languages. [`tests/test_daemon_parity.py`](../tests/test_daemon_parity.py) compiles the daemon and checks that both give the same verdict for every zone pair and protocol, so the copies can't drift apart unnoticed.
 
 ## Wire protocol
@@ -97,14 +99,29 @@ This blocks two attacks, both exercised by the live test:
 
 It also means the C++ daemon, which only sees IP addresses, always receives a source IP that agrees with the packet's real zone.
 
-## Why some allowed traffic still fails: a stateless firewall
+## Connection tracking
 
-The firewall judges each packet on its own, with no memory of earlier packets. A ping or TCP connection works only if **both directions** are allowed. The live test's reachability matrix shows the effect:
+The policy rules decide who may **start** a connection. [`conntrack.py`](../conntrack.py) remembers connections they allowed, so replies get back in even where a rule blocks that direction. Without it, a connection works only if both directions are allowed: Dept B → Trust ICMP is allowed, but rule 4 blocks Trust → Dept B ICMP, so Dept B's pings went unanswered.
 
-- Dept B → Trust ICMP is allowed, but the echo reply (Trust → Dept B ICMP) is blocked by rule 4, so Dept B can't ping Trust.
-- Dept A → Untrust ICMP is allowed, but the echo reply (Untrust → Dept A ICMP) is blocked by rule 2, so Dept A can't ping Untrust.
+For each IP packet that crosses zones, the controller gets the stateless verdict from the firewall and then asks the connection table:
 
-A stateful firewall with connection tracking would let replies to allowed connections back in. It's on the roadmap.
+- **Allowed by the rules:** route it. If it can start a connection, record it.
+- **Blocked by the rules, but a reply to a recorded connection:** route it.
+- **Anything else:** drop it.
+
+A connection is identified by source and destination IP, protocol, and TCP/UDP ports, or the echo identifier for ping. A reply must match the recorded connection exactly, with addresses and ports swapped.
+
+**Ping direction matters.** Any TCP or UDP packet can start a connection or be a reply. For ICMP, only an echo request can start one and only an echo reply can answer it. Otherwise, after Dept B pings Trust, Trust could send an echo *request* with the same identifier and have it pass as a reply. ICMP error messages aren't tracked; they follow the rules alone.
+
+**Entries can't be planted.** An entry is created only by a packet the rules allow, from the side allowed to start the connection. Anti-spoofing runs first, so that packet's source IP is guaranteed to belong to the zone it came from. An outside host can't create an entry that would open a path into a protected zone.
+
+**Expiry.** An entry is forgotten after 120 seconds without a packet of the connection reaching the controller, in either direction. While flow rules carry a connection, the controller only sees its packets when those rules expire (at most 60 seconds), so active connections stay recorded. A timer clears expired entries every 30 seconds to free memory; lookups check expiry themselves.
+
+**Isolating the server needed its own rule.** Before tracking, the data center could send to Trust and Untrust but never got replies, which isolated it in practice. Tracking would have let those replies in, so rule 7 now blocks the data center from starting traffic to either outside zone.
+
+**Known limitation.** Replies get flow rules like any routed traffic, and OpenFlow 1.0 rules can't match the echo identifier. Once a ping's reply rule is installed, any echo reply between those two hosts passes for up to 60 seconds, not only replies to that ping. The controller's own check is exact, and TCP and UDP rules match ports exactly, so this affects only echo replies.
+
+The live test checks both sides: Dept B can ping Trust and Dept A can ping Untrust, while Trust and Untrust still can't start those pings.
 
 ## Benchmark: C++ daemon vs. in-process Python
 

@@ -32,9 +32,10 @@ flowchart TB
 
 - **The controller is the router and the firewall.** There's no firewall appliance and no static switch rules: a custom [POX](https://github.com/noxrepo/pox) controller answers ARP for every zone's gateway, routes between zones, and enforces the access policy.
 - **Routed traffic at switch speed.** After the controller allows a connection's first packet, it installs OpenFlow rules so the switches route the rest of the connection themselves, including the TTL decrement. Routed throughput went from 4–9% of same-zone throughput to 93–100% (18.7 → 199 Mbit/s in comparable runs), and average ping dropped from about 9 ms to 1–2.5 ms.
+- **Stateful firewall.** The rules decide who may *start* a connection, and a connection-tracking table lets replies back in. Dept B can ping Trust, but Trust still can't start a ping to Dept B.
 - **Blocks IP and ARP spoofing.** A packet's zone comes from the switch port it arrived on, which a host can't fake, and packets whose source IP doesn't match that zone are dropped.
 - **Policy decisions in C++.** A standalone C++ daemon makes the allow/deny decision over a 13-byte binary protocol on a Unix socket, with the Python implementation as a fallback.
-- **Tested with real traffic.** A Docker-based live test sends pings and TCP connections between every pair of zones, checks the switch rules for routed traffic, and runs both spoofing attacks (55 checks). 256 unit tests cover the rules, the wire protocol, and agreement between the Python and C++ implementations. Everything runs in CI on every push.
+- **Tested with real traffic.** A Docker-based live test sends pings and TCP connections between every pair of zones, checks connection tracking and the switch rules for routed traffic, and runs both spoofing attacks (59 checks). 283 unit tests cover the rules, connection tracking, the wire protocol, and agreement between the Python and C++ implementations. Everything runs in CI on every push.
 - **Measured honestly.** The benchmark shows the C++ daemon is 5–11x *slower* per decision than in-process Python for this small rule set, and the [design notes](docs/design.md#benchmark-c-daemon-vs-in-process-python) explain why.
 
 ## Overview
@@ -57,7 +58,7 @@ Here, the switches send any packet they don't have a rule for to the controller 
 | 8 | Any host | Same zone, non-IP (e.g. ARP) | Flood within the zone |
 | 9 | Any host | Anything else between known zones | Allow and route |
 
-Traffic to or from an address outside all five subnets is denied before any of these rules apply.
+The rules decide who may start a connection. Replies to an allowed connection are let back in even when a rule blocks that direction, so Dept B can ping Trust although rule 4 blocks Trust → Dept B ICMP. Traffic to or from an address outside all five subnets is denied before any of these rules apply.
 
 ## Tech stack
 
@@ -117,6 +118,11 @@ Each check prints `PASS` or `FAIL`, followed by the measured reachability betwee
   [PASS] h101      -> h201      tcp  allowed
   [PASS] h_untrust -> h_server  tcp  blocked
   ...
+*** Stateful firewall: replies pass, reverse connections do not
+  [PASS] h201 pings h_trust (reply passes despite rule 4)
+  [PASS] h_trust still cannot start a ping to h201
+  [PASS] h101 pings h_untrust (reply passes despite rule 2)
+  [PASS] h_untrust still cannot start a ping to h101
 *** Routed connections get switch flow rules (h201 -> h_server)
   [PASS] every reply arrives with TTL decremented once  (TTLs: 63, 63, 63, 63, 63)
   [PASS] core switch has a routing rule for the connection
@@ -137,13 +143,13 @@ The reachability matrix it measures (row = source, column = destination; `ping /
 
 | From \ To | Dept A | Dept B | Data center | Trust | Untrust |
 |---|---|---|---|---|---|
-| **Dept A** | same zone | -- / ok | ok / ok | ok / ok | -- / ok |
-| **Dept B** | -- / ok | same zone | ok / ok | -- / ok | -- / ok |
+| **Dept A** | same zone | -- / ok | ok / ok | ok / ok | ok / ok |
+| **Dept B** | -- / ok | same zone | ok / ok | ok / ok | ok / ok |
 | **Data center** | ok / ok | ok / ok | same zone | -- / -- | -- / -- |
 | **Trust** | ok / ok | -- / ok | -- / -- | same zone | ok / ok |
 | **Untrust** | -- / ok | -- / ok | -- / -- | ok / ok | same zone |
 
-Some combinations the policy allows still show `--`, such as Dept B pinging Trust. The firewall checks each packet on its own, so the reply also has to be allowed. See [why some allowed traffic still fails](docs/design.md#why-some-allowed-traffic-still-fails-a-stateless-firewall).
+The matrix isn't symmetric: Dept B can ping Trust, but Trust can't ping Dept B, because only the side the rules allow can start a connection. See [connection tracking](docs/design.md#connection-tracking).
 
 ## Usage: explore the network interactively
 
@@ -234,7 +240,7 @@ Absolute numbers depend on the machine, so compare the two paths within one run.
 
 ## Learn more
 
-[Design notes](docs/design.md) cover how routing works step by step, the flow rules and their performance results, the C++ daemon and its wire protocol, anti-spoofing, the benchmark results, and the bugs the tests found.
+[Design notes](docs/design.md) cover how routing works step by step, the flow rules and their performance results, connection tracking, the C++ daemon and its wire protocol, anti-spoofing, the benchmark results, and the bugs the tests found.
 
 ## Project structure
 
@@ -242,6 +248,7 @@ Absolute numbers depend on the machine, so compare the two paths within one run.
 .
 ├── controller.py          # POX controller: ARP, routing, anti-spoofing, firewall calls
 ├── firewall_rules.py      # Zone definitions and allow/deny rules (pure Python)
+├── conntrack.py           # Connection tracking: lets replies to allowed connections back in
 ├── firewall_client.py     # Python client for the C++ daemon's socket protocol
 ├── topology.py            # Mininet network: 6 switches, 11 hosts
 ├── bench_firewall.py      # Latency benchmark: Python vs. C++ daemon
@@ -254,7 +261,6 @@ Absolute numbers depend on the machine, so compare the two paths within one run.
 
 ## Roadmap and known limitations
 
-- **Stateless firewall:** replies to allowed connections can be blocked (see above). Next step: connection tracking.
 - **Blocked traffic still reaches the controller packet by packet.** Only allowed connections get switch rules. Drop rules for denied connections would keep a flood of blocked packets off the controller.
 - **Policy is hard-coded in two places,** Python and C++, kept in sync by tests. Moving it into one config file would remove the duplication.
 - **Switch port numbers are hard-coded** in `controller.py` to match `topology.py`'s link order, so changing the topology means updating both.
