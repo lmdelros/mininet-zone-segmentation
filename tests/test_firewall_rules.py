@@ -10,7 +10,8 @@ import ipaddress
 
 import pytest
 
-from firewall_rules import ZONES, firewall_allowed, zone_for_ip
+from firewall_rules import (ZONES, firewall_allowed, source_ip_valid_for_zone,
+                            zone_for_ip)
 
 # One representative host per zone (same addresses topology.py and
 # bench_firewall.py use).
@@ -171,3 +172,37 @@ def test_ip_level_decision(pair, expected):
                                is_icmp=True)
     assert verdict == expected[1]
 
+
+# -- anti-spoofing (source IP must match the ingress port's zone) --------
+
+@pytest.mark.parametrize('zone, ip', HOSTS.items())
+def test_honest_source_ip_is_valid(zone, ip):
+    assert source_ip_valid_for_zone(ip, zone)
+
+
+@pytest.mark.parametrize('ingress, claimed',
+                         [(i, c) for i in ZONES for c in ZONES if i != c])
+def test_source_ip_from_another_zone_is_spoofed(ingress, claimed):
+    # e.g. a Dept A host forging h_server's IP to hijack its traffic,
+    # or an untrusted host forging a Dept A IP to dodge rule 2.
+    assert not source_ip_valid_for_zone(HOSTS[claimed], ingress)
+
+
+@pytest.mark.parametrize('zone', ZONES)
+@pytest.mark.parametrize('ip', ['8.8.8.8', '10.1.4.1', '0.0.0.0'])
+def test_source_ip_outside_every_zone_is_spoofed(zone, ip):
+    assert not source_ip_valid_for_zone(ip, zone)
+
+
+@pytest.mark.parametrize('zone', ZONES)
+def test_host_cannot_claim_its_gateway_ip(zone):
+    assert not source_ip_valid_for_zone(ZONES[zone]['gateway'], zone)
+
+
+def test_unknown_ingress_zone_is_spoofed():
+    assert not source_ip_valid_for_zone('10.1.1.101', None)
+
+
+def test_spoof_check_accepts_non_string_addresses():
+    assert source_ip_valid_for_zone(ipaddress.IPv4Address('10.1.3.178'), 'DataCenter')
+    assert not source_ip_valid_for_zone(ipaddress.IPv4Address('10.1.3.1'), 'DataCenter')

@@ -69,6 +69,21 @@ def zone_for_ip(ip):
     return None
 
 
+def source_ip_valid_for_zone(src_ip, ingress_zone):
+    """Anti-spoofing check: a packet's claimed source IP must fall inside
+    the subnet of the zone it physically arrived from (derived from the
+    switch port, which a host can't forge). Anything else -- an IP from
+    another zone, or one outside every zone -- is treated as spoofed.
+    The zone's gateway IP is also rejected: it belongs to the controller,
+    so no real host may send from it.
+    """
+    if ingress_zone not in ZONES:
+        return False
+    if str(src_ip) == ZONES[ingress_zone]['gateway']:
+        return False
+    return zone_for_ip(src_ip) == ingress_zone
+
+
 def firewall_allowed(src_zone, dst_zone, is_icmp):
     # Default-deny for anything outside the known zones (zone_for_ip
     # returns None): an address the policy doesn't know about can't be

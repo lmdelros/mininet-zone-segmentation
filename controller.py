@@ -14,9 +14,9 @@ injecting it at the core switch out the port toward the destination.
 Leaf uplinks: a packet arriving on a leaf switch's port to the core was
 put there by the controller (a routed packet or an ARP probe) or by the
 core's own intra-zone L2 forwarding, so it has already been firewalled
-at its real ingress. Those packets are delivered as plain L2 transit,
-without re-running the zone checks or learning host locations from
-them (see _handle_transit).
+and spoof-checked at its real ingress. Those packets are delivered as
+plain L2 transit, without re-running the zone checks or learning host
+locations from them (see _handle_transit).
 
 Firewall policy (src zone -> dst zone):
     1. Untrust  -> Data Center : block ALL IP
@@ -53,7 +53,8 @@ from pox.lib.packet.ipv4 import ipv4
 from pox.lib.packet.icmp import icmp, unreach
 from pox.lib.recoco import Timer
 
-from firewall_rules import ZONES, zone_for_ip, firewall_allowed
+from firewall_rules import (ZONES, zone_for_ip, firewall_allowed,
+                            source_ip_valid_for_zone)
 from firewall_client import FirewallClient, IPPROTO_ICMP
 
 log = core.getLogger()
@@ -191,11 +192,12 @@ class ZoneRouter(object):
 
     def _handle_transit(self, event, packet, dpid, in_port):
         """A packet coming down a leaf's uplink from the core: already
-        firewalled at its real ingress (see module docstring). Its
-        source host isn't behind this leaf, so learning its location
-        here would send that host's traffic to the wrong core port, and
-        re-running the zone checks would misread it as coming from this
-        leaf's zone. Learn only the MAC and deliver it at L2."""
+        firewalled and spoof-checked at its real ingress (see module
+        docstring). Its source host isn't behind this leaf, so learning
+        its location here would send that host's traffic to the wrong
+        core port, and re-running the checks would misfire -- a routed
+        packet's source IP is from another zone, and an ARP probe's is
+        the gateway IP. Learn only the MAC and deliver it at L2."""
         self.mac_table.setdefault(dpid, {})[packet.src] = in_port
         if packet.dst.is_multicast:
             self._flood_in_zone(event, dpid, in_port)
@@ -208,6 +210,15 @@ class ZoneRouter(object):
         arp_pkt = packet.next
         src_zone = zone_of_port(dpid, in_port)
         if src_zone is None:
+            return
+
+        # Anti-spoofing: ARP is how this controller learns host
+        # locations, so a forged sender IP (e.g. a Dept A host claiming
+        # to be h_server) would redirect that IP's traffic to the
+        # attacker. Drop it before anything gets learned.
+        if not source_ip_valid_for_zone(arp_pkt.protosrc, src_zone):
+            log.warning("DROP spoofed ARP from %s port %s: claims %s, port is %s",
+                         dpid, in_port, arp_pkt.protosrc, src_zone)
             return
 
         is_gateway_target = any(str(arp_pkt.protodst) == z['gateway']
@@ -273,6 +284,15 @@ class ZoneRouter(object):
         ip_pkt = packet.next
         src_zone = zone_of_port(dpid, in_port)
         if src_zone is None:
+            return
+
+        # Anti-spoofing: the source IP must belong to the zone of the
+        # port the packet arrived on. Checked before _learn() so a forged
+        # source can't poison ip_to_loc, and before the firewall so the
+        # C++ daemon (which classifies by IP) always sees an honest one.
+        if not source_ip_valid_for_zone(ip_pkt.srcip, src_zone):
+            log.warning("DROP spoofed IP from %s port %s: claims %s, port is %s",
+                         dpid, in_port, ip_pkt.srcip, src_zone)
             return
 
         self._learn(dpid, in_port, ip_pkt.srcip, packet.src, src_zone)
