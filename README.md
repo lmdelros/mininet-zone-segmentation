@@ -78,12 +78,17 @@ Times the same decision (raw src/dst IP + protocol → allow/deny) end-to-end on
 
 ```
 .
-├── topology.py         # Mininet network topology (6 switches, 10 hosts)
+├── topology.py         # Mininet network topology (6 switches, 11 hosts)
 ├── controller.py        # POX controller: routing, ARP, firewall dispatch (Python or C++ backend)
 ├── firewall_rules.py     # Pure Python zone/firewall rule logic (no POX dependency)
 ├── firewall_client.py     # Python client for the C++ firewall daemon (Unix domain socket)
 ├── bench_firewall.py       # Latency benchmark: Python in-process vs. C++ daemon
 ├── tests/                  # pytest suite (rules, wire protocol, Python/C++ parity)
+├── integration/
+│   └── live_test.py         # Live Mininet test: policy matrix + spoofing attacks
+├── docker/
+│   ├── Dockerfile           # Mininet + OVS + POX + g++ test environment
+│   └── run_live_tests.sh    # Container entrypoint: starts everything, runs the live test
 ├── cpp/
 │   ├── firewall_daemon.cpp  # Standalone C++ firewall daemon
 │   └── Makefile
@@ -133,12 +138,44 @@ The suite (`tests/`) has three layers:
 
 The parity tests already found one real bug: the daemon ignored SIGINT/SIGTERM because glibc's `signal()` sets `SA_RESTART`, which silently restarts the blocked `accept()`. It now uses `sigaction` without that flag.
 
-Not yet tested: end-to-end behavior in a live Mininet network. Planned follow-up is an automated script that drives Mininet's Python API and asserts the expected pass/fail result per zone pair.
+### Live end-to-end test (Docker)
+
+```bash
+docker build -t zone-seg-live docker/
+docker run --rm --privileged -v "$PWD:/src:ro" zone-seg-live
+```
+
+The container runs Mininet, Open vSwitch, POX, and the C++ daemon, then runs `integration/live_test.py`, which sends real traffic through the network (52 checks):
+
+- **Policy matrix:** ping (ICMP) and a TCP connect between one host in every zone and every other zone, compared against `firewall_rules.firewall_allowed()`.
+- **Same-zone delivery:** on one leaf switch, and across two leaves via the core.
+- **IP spoofing:** `h_untrust` forges a Trust source IP to get around rule 2. A capture on the attacker confirms the packets were sent; a capture on `h101` confirms none arrived.
+- **ARP spoofing:** `h101` announces `h_server`'s IP; `h201` must still reach the real server afterwards.
+
+Open vSwitch runs with its userspace datapath, so no OVS kernel module is needed (Docker Desktop on WSL2 works). On a regular Mininet VM you can run the script directly against a running POX with `sudo python3 integration/live_test.py`.
+
+Measured result (row = source, column = destination; `ping / tcp`, `ok` = connects, `--` = blocked):
+
+| src \ dst | DeptA | DeptB | DataCenter | Trust | Untrust |
+|---|---|---|---|---|---|
+| DeptA | same zone | -- / ok | ok / ok | ok / ok | -- / ok |
+| DeptB | -- / ok | same zone | ok / ok | -- / ok | -- / ok |
+| DataCenter | ok / ok | ok / ok | same zone | -- / -- | -- / -- |
+| Trust | ok / ok | -- / ok | -- / -- | same zone | ok / ok |
+| Untrust | -- / ok | -- / ok | -- / -- | ok / ok | same zone |
+
+The firewall is **stateless**: it checks each packet on its own, so a connection only works if the reply direction is allowed too. That's why Dept B can't ping Trust (the echo reply would be Trust → Dept B ICMP, blocked by rule 4), and why the data center can't open connections to either external zone (replies are blocked by rules 1 and 3). Connection tracking would fix this; see the roadmap.
+
+The first live run found three bugs the unit tests couldn't, all fixed:
+
+1. **Routed packets sent out the wrong port.** Routed traffic is injected at the core switch, but host locations were recorded as *leaf* port numbers, so traffic for `h_server` (s5 port 1) went out *core* port 1, toward Dept A. Locations are now stored as core ports.
+2. **Malformed ICMP errors.** POX's `icmp` packs only 4 header bytes, so the 4 unused bytes before the quoted IP header were missing and receivers couldn't parse it. These now use POX's `unreach` body.
+3. **Anti-spoofing dropped transit traffic.** Packets coming down a leaf's uplink were already checked at their real ingress. Re-checking them flagged routed packets and the router's own ARP probes as spoofed. Uplink traffic is now delivered as L2 transit.
 
 ## Roadmap
 
+- Connection tracking (stateful firewall), so allowed connections get their replies back
+- Install OpenFlow flow rules for routed traffic, so only a flow's first packet goes to the controller
 - Move firewall rules into a config file (YAML/JSON) instead of hardcoded IPs
-- Automated Mininet integration test (see Testing & Verification above)
 - Logging/metrics for rule hits and drop counts
-- Containerize the environment (Docker/Vagrant) for reproducibility
 - Second core switch for redundancy; NAT for external hosts
