@@ -26,8 +26,11 @@ from mininet.link import TCLink
 from mininet.log import setLogLevel, info
 
 
-def build_network():
-    net = Mininet(controller=RemoteController, switch=OVSSwitch,
+def build_network(switch=OVSSwitch):
+    # `switch` is overridable so environments without the OVS kernel
+    # module (Docker on WSL2, most CI runners) can pass
+    # partial(OVSSwitch, datapath='user') for the userspace datapath.
+    net = Mininet(controller=RemoteController, switch=switch,
                    link=TCLink, autoSetMacs=True, build=False)
 
     info('*** Adding controller\n')
