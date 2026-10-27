@@ -1,7 +1,8 @@
 #!/bin/bash
 # Container entrypoint: start OVS (userspace), build and start the C++
-# firewall daemon, start POX with the zone controller, then run the live
-# Mininet test. Exits with the test's status; dumps logs on failure.
+# firewall daemon, start POX with the zone controller, then run a Mininet
+# script from integration/ (the live test by default; see TEST_SCRIPT
+# below). Exits with the script's status; dumps logs on failure.
 set -euo pipefail
 
 SRC=${SRC:-/src}
@@ -29,8 +30,10 @@ for _ in $(seq 50); do
     sleep 0.2
 done
 
+# TEST_SCRIPT picks which script in integration/ to run (default: the
+# live policy test; perf_test.py measures throughput and latency).
 status=0
-python3 "$WORK"/integration/live_test.py --datapath user "$@" || status=$?
+python3 "$WORK"/integration/"${TEST_SCRIPT:-live_test.py}" --datapath user "$@" || status=$?
 
 if [ "$status" -ne 0 ]; then
     echo; echo "===== POX log ====="; cat /tmp/pox.log

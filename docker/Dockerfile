@@ -18,7 +18,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         mininet openvswitch-switch \
         g++ make git ca-certificates \
-        iputils-ping netcat-openbsd iproute2 tcpdump ethtool python3 \
+        iputils-ping netcat-openbsd iproute2 tcpdump ethtool iperf3 python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # POX ichthyosaur (Python 3), pinned for reproducibility.
