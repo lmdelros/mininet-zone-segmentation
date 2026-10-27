@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Compiled C++ firewall daemon (built by `make -C cpp`)
+cpp/firewall_daemon
