@@ -29,6 +29,7 @@ import os
 import re
 import statistics
 import sys
+import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
@@ -65,6 +66,18 @@ def ping_rtt(client, server_ip, count):
             'max': float(m.group(3)), 'loss': loss.group(1) if loss else '?'}
 
 
+def count_drops(pox_log):
+    with open(pox_log) as f:
+        return sum(1 for line in f if 'DROP' in line)
+
+
+def flood_drops(attacker, target_ip, pox_log, count=500):
+    before = count_drops(pox_log)
+    attacker.cmd('ping -q -c {} -i 0.002 -W 1 {}'.format(count, target_ip))
+    time.sleep(1)  # let the controller finish handling and logging
+    return count_drops(pox_log) - before
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--datapath', choices=['kernel', 'user'], default='kernel')
@@ -74,6 +87,10 @@ def main():
                         help='iperf3 runs per path (default 3)')
     parser.add_argument('--pings', type=int, default=20,
                         help='pings per path for latency (default 20)')
+    parser.add_argument('--flood', type=int, default=500,
+                        help='blocked pings in the flood test (default 500)')
+    parser.add_argument('--pox-log', default='/tmp/pox.log',
+                        help='POX log file, used to count blocked packets')
     args = parser.parse_args()
 
     setLogLevel('warning')
@@ -113,6 +130,14 @@ def main():
                     speeds.append(mbps)
             rows.append((label, speeds, rtt))
             dst.cmd('pkill -f "iperf3 -s"')
+
+        # Blocked traffic: Untrust -> Data Center is denied by rule 1. Every
+        # packet that reaches the controller is a packet it has to check
+        # and drop itself, so this counts the load a flood puts on it.
+        print('\n*** Blocked flood: h_untrust -> h_server, {} pings'.format(args.flood))
+        drops = flood_drops(net['h_untrust'], net['h_server'].IP(), args.pox_log,
+                            args.flood)
+        print('  {} of {} blocked packets reached the controller'.format(drops, args.flood))
 
         print('\n*** Summary ({}s x {} iperf3 runs, {} pings per path)\n'.format(
             args.duration, args.runs, args.pings))
