@@ -114,6 +114,14 @@ for _port, _zone in CORE_PORT_ZONES.items():
 ROUTED_FLOW_IDLE_TIMEOUT = 30  # seconds
 ROUTED_FLOW_HARD_TIMEOUT = 60
 
+# Blocked connections get a drop rule on the switch they entered, so a
+# flood of blocked packets stays off the controller. Shorter than the
+# routed timeouts: if the other side later opens a connection that
+# reuses exactly the same addresses and ports, its replies would hit
+# this rule until it expires.
+DROP_FLOW_IDLE_TIMEOUT = 10  # seconds
+DROP_FLOW_HARD_TIMEOUT = 30
+
 CONN_EXPIRE_INTERVAL = 30  # seconds between sweeps of idle connections
 
 ARP_RETRY_INTERVAL = 1  # seconds
@@ -340,6 +348,7 @@ class ZoneRouter(object):
         if self.conns.check(policy_allowed, self._tracked(ip_pkt)) is None:
             log.info("DROP %s -> %s (%s): %s -> %s", src_zone, dst_zone,
                       "ICMP" if is_icmp else "IP", ip_pkt.srcip, ip_pkt.dstip)
+            self._install_drop_flow(event)
             return
 
         self._route(event, packet, ip_pkt, dst_zone)
@@ -373,6 +382,15 @@ class ZoneRouter(object):
                               out_port, dst_mac)
         else:
             self._queue_and_resolve(event.dpid, event.port, packet, ip_pkt, dst_zone)
+
+    def _install_drop_flow(self, event):
+        """Have the switch the packet entered drop the rest of this
+        connection itself. Like the routed rules, it matches the exact
+        connection, and a flow_mod with no actions means drop."""
+        msg = of.ofp_flow_mod(match=of.ofp_match.from_packet(event.parsed, event.port),
+                              idle_timeout=DROP_FLOW_IDLE_TIMEOUT,
+                              hard_timeout=DROP_FLOW_HARD_TIMEOUT)
+        event.connection.send(msg)
 
     def _install_route_flows(self, event, dst_zone, out_port, dst_mac):
         """Install switch rules so the rest of this connection is routed

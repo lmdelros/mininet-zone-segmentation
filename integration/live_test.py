@@ -188,6 +188,46 @@ def test_routed_flow_rules(net, results):
                   '{} packets matched the rule'.format(matched))
 
 
+def count_drop_lines(pox_log):
+    with open(pox_log) as f:
+        return sum(1 for line in f if 'DROP' in line)
+
+
+def test_blocked_flood(net, results, pox_log):
+    """A blocked connection should get a drop rule on the switch it
+    entered, so a flood of it stays off the controller."""
+    print('\n*** Blocked flood stays off the controller (h_untrust -> h_server)')
+    if not os.path.exists(pox_log):
+        print('  (skipped: no POX log at {})'.format(pox_log))
+        return
+    attacker, target = net['h_untrust'], net['h_server']
+    core = net['s6']  # h_untrust is wired to the core
+    conn = 'icmp,nw_src={},nw_dst={}'.format(attacker.IP(), target.IP())
+    # The policy matrix already pinged this pair, so a drop rule may still
+    # be installed. Remove it, so the flood's first packet must reach the
+    # controller and the rule under test is the one it installs.
+    core.dpctl('del-flows', conn)
+
+    count, allowed_through = 200, 10
+    before = count_drop_lines(pox_log)
+    attacker.cmd('ping -q -c {} -i 0.005 -W 1 {}'.format(count, target.IP()))
+    time.sleep(1)
+    handled = count_drop_lines(pox_log) - before
+    # The first packet must reach the controller. A few more can arrive
+    # before the switch installs the rule; without drop rules, all would.
+    results.check(1 <= handled <= allowed_through,
+                  'controller saw the flood start but at most {} of {} pings'.format(
+                      allowed_through, count),
+                  '{} reached the controller'.format(handled))
+
+    flows = core.dpctl('dump-flows')
+    rule = [line for line in flows.splitlines()
+            if 'icmp' in line and 'nw_src={}'.format(attacker.IP()) in line
+            and 'nw_dst={}'.format(target.IP()) in line]
+    results.check(bool(rule) and 'actions=drop' in rule[0],
+                  "attacker's switch holds a drop rule for the connection")
+
+
 def test_ip_spoofing(net, results):
     """h_untrust forges a Trust source IP to dodge rule 2: Trust may ping
     Dept A, Untrust may not."""
@@ -291,6 +331,7 @@ def main():
         test_same_zone(net, results)
         test_stateful_firewall(net, results)
         test_routed_flow_rules(net, results)
+        test_blocked_flood(net, results, args.pox_log)
         test_ip_spoofing(net, results)
         test_arp_spoofing(net, results, args.pox_log)
         print_matrix(matrix)
