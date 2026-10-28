@@ -3,6 +3,7 @@
 This document explains how the controller routes and filters traffic, why the firewall decision runs in a separate C++ process, what the benchmark measured, and which bugs the tests found. For setup and usage, see the [README](../README.md).
 
 - [How a packet gets routed](#how-a-packet-gets-routed)
+- [Network layout](#network-layout)
 - [Flow rules for routed traffic](#flow-rules-for-routed-traffic)
 - [Firewall backends](#firewall-backends)
 - [Wire protocol](#wire-protocol)
@@ -17,7 +18,7 @@ The network has no real router. Every host's default gateway (for example `10.1.
 
 1. **ARP.** Before a host's first packet to another zone, it asks "who has `10.1.1.1`?" The question reaches the controller as an OpenFlow *packet-in*, and the controller answers with a made-up gateway MAC address. The controller also records where that host lives.
 2. **Packet-in on the host's own switch.** The host sends its packet to the gateway MAC. The host's switch has no rule for it, so it hands the packet to the controller.
-3. **Checks.** The controller works out the source zone from the switch port the packet arrived on, drops the packet if its source IP doesn't belong to that zone ([anti-spoofing](#anti-spoofing)), and asks the firewall whether this zone pair and protocol is allowed. A blocked packet still passes if it's a reply to a connection the firewall allowed ([connection tracking](#connection-tracking)).
+3. **Checks.** The controller works out the source zone from the switch port the packet arrived on ([network layout](#network-layout)), drops the packet if its source IP doesn't belong to that zone ([anti-spoofing](#anti-spoofing)), and asks the firewall whether this zone pair and protocol is allowed. A blocked packet still passes if it's a reply to a connection the firewall allowed ([connection tracking](#connection-tracking)).
 4. **Routing.** If allowed, the controller decrements the TTL, rewrites the MAC addresses like a real router hop, and injects the packet at the core switch (`s6`) out the port that leads to the destination. It also installs switch rules so the rest of the connection skips steps 2–4 ([below](#flow-rules-for-routed-traffic)).
 
 Host locations are stored as *core switch ports*, because routed packets always leave from the core. A host behind leaf switch `s5` is recorded as "core port 5". If the controller doesn't know where a destination is yet, it sends ARP probes into the destination zone, queues the packet, and replies with an ICMP Host Unreachable error after three failed attempts.
@@ -25,6 +26,21 @@ Host locations are stored as *core switch ports*, because routed packets always 
 Packets that arrive on a leaf switch's uplink were put there by the controller or by the core's same-zone forwarding. They have already been checked at their real ingress, so they're delivered as plain layer-2 transit: no zone checks and no location learning.
 
 Traffic within one zone is forwarded at layer 2. The controller installs an OpenFlow flow rule so later packets of that flow stay in the switch.
+
+## Network layout
+
+A packet's zone comes from the switch port it arrived on, so the map from ports to zones is what anti-spoofing, the firewall rules, and connection tracking all build on. If it's wrong, traffic is classified into the wrong zone and the wrong rules apply, with no error.
+
+[`network.json`](../network.json) lists every switch (its ID, and which zone a leaf serves or that it's the core), each leaf's uplink with the port numbers at both ends, and every host with its IP and the switch port it plugs into. Two things read it:
+
+- [`topology.py`](../topology.py) builds the Mininet network from it, connecting each cable to its stated port numbers. Mininet otherwise numbers ports in the order links are created, which is how the old hand-written topology got its ports.
+- The controller derives its port maps from it at startup through `port_maps()` in [`network.py`](../network.py): the core switch's ID, each leaf's zone, each leaf's uplink port, the core port facing each leaf, and the zone behind every core port.
+
+A host's zone isn't written in the file: it comes from the host's IP through `policy.json`, so the layout can't contradict the policy. `load_network()` refuses a layout with no core switch or more than one, a leaf without exactly one uplink, two cables on one port, a host IP outside every zone, reserved, or used twice, or a host plugged into another zone's switch.
+
+Two checks confirmed the change. Building the network with every host, uplink, and switch listed in reverse order put every cable on the same ports. And with two hosts added only in `network.json` (a Dept A host on a leaf and a Trust host on a new core port), both behaved exactly as the policy says. The controller from before this change, with hand-typed maps, dropped everything from the new Trust host, because it didn't know that core port existed.
+
+Real SDN controllers can discover switch-to-switch links on their own with LLDP. That would remove the uplink list, but the zone of each host port would still need to be configured, and the controller couldn't safely forward anything until discovery finished.
 
 ## Flow rules for routed traffic
 

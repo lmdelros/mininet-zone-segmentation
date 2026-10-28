@@ -37,7 +37,8 @@ flowchart TB
 - **Blocks IP and ARP spoofing.** A packet's zone comes from the switch port it arrived on, which a host can't fake, and packets whose source IP doesn't match that zone are dropped.
 - **Policy decisions in C++.** A standalone C++ daemon makes the allow/deny decision over a 13-byte binary protocol on a Unix socket, with the Python implementation as a fallback.
 - **One policy file for both languages.** Zones and rules live in [`policy.json`](policy.json). The Python controller loads and validates it, and the C++ build generates its rule tables from it, so the two firewalls can't disagree.
-- **Tested with real traffic.** A Docker-based live test sends pings and TCP connections between every pair of zones, checks connection tracking and the switch rules for routed and blocked traffic, and runs both spoofing attacks (61 checks). 305 unit tests cover the rules, policy-file validation, connection tracking, the wire protocol, and agreement between the Python and C++ implementations. Everything runs in CI on every push.
+- **Network layout in one file.** Every switch, host, and port is listed in [`network.json`](network.json). Mininet builds the network from it and the controller derives its port-to-zone maps from it, so adding a host is a one-file edit, and a layout that contradicts itself or the policy is rejected at startup.
+- **Tested with real traffic.** A Docker-based live test sends pings and TCP connections between every pair of zones, checks connection tracking and the switch rules for routed and blocked traffic, and runs both spoofing attacks (61 checks). 326 unit tests cover the rules, policy and network-layout validation, connection tracking, the wire protocol, and agreement between the Python and C++ implementations. Everything runs in CI on every push.
 - **Measured honestly.** The benchmark shows the C++ daemon is 5–11x *slower* per decision than in-process Python for this small rule set, and the [design notes](docs/design.md#benchmark-c-daemon-vs-in-process-python) explain why.
 
 ## Overview
@@ -66,7 +67,7 @@ Rules 1–7 and the zones are defined in [`policy.json`](policy.json); see [Chan
 
 ## Tech stack
 
-- **[Mininet](http://mininet.org/) 2.3**: emulates the 11 hosts, 6 switches, and links on one Linux machine ([`topology.py`](topology.py)).
+- **[Mininet](http://mininet.org/) 2.3**: emulates the 11 hosts, 6 switches, and links on one Linux machine ([`topology.py`](topology.py) builds them from [`network.json`](network.json)).
 - **[Open vSwitch](https://www.openvswitch.org/)**: the virtual switches; they follow the controller's OpenFlow instructions.
 - **[POX](https://github.com/noxrepo/pox) (ichthyosaur branch, Python 3)**: the SDN controller framework that runs the router and firewall logic ([`controller.py`](controller.py)).
 - **OpenFlow 1.0**: the protocol between the switches and the controller.
@@ -245,6 +246,18 @@ The zones and rules 1–7 live in [`policy.json`](policy.json). Each rule lists 
 
 4. On a VM, copy `policy.json` into `~/pox/ext/` again and restart the controller and the daemon. The Docker live test always uses the repository's current `policy.json`.
 
+### Changing the network
+
+Switches, hosts, and the switch port each cable plugs into live in [`network.json`](network.json). A host's zone comes from its IP address, so it can't contradict `policy.json`. For example, this adds a fifth Dept A host on port 4 of switch `s1`:
+
+```json
+"h105": {"ip": "10.1.1.105", "switch": "s1", "port": 4}
+```
+
+1. Add the entry under `"hosts"`. If the layout is inconsistent, such as two cables on one port, a host whose IP is outside every zone, or a Dept A host plugged into a Dept B switch, Mininet and the controller both refuse to start with a message saying what's wrong.
+2. Run the tests (`python -m pytest`). The test that compares the controller's port maps with a hand-typed copy only changes if you add a host directly to the core switch `s6`, which creates a new core port.
+3. On a VM, copy `network.json` into `~/pox/ext/` again, restart the controller, and start the network again. The Docker live test always uses the repository's current `network.json`.
+
 ## Running tests
 
 Unit tests (any OS; the C++ comparison tests need Linux and g++ and are skipped elsewhere):
@@ -280,10 +293,12 @@ Absolute numbers depend on the machine, so compare the two paths within one run.
 .
 ├── controller.py          # POX controller: ARP, routing, anti-spoofing, firewall calls
 ├── policy.json            # Zones and firewall rules, shared by Python and C++
+├── network.json           # Switches, hosts, and the port each cable uses
+├── network.py             # Loads and validates network.json; derives the controller's port maps
 ├── firewall_rules.py      # Loads and validates policy.json; allow/deny decision
 ├── conntrack.py           # Connection tracking: lets replies to allowed connections back in
 ├── firewall_client.py     # Python client for the C++ daemon's socket protocol
-├── topology.py            # Mininet network: 6 switches, 11 hosts
+├── topology.py            # Builds the Mininet network from network.json
 ├── bench_firewall.py      # Latency benchmark: Python vs. C++ daemon
 ├── cpp/                   # C++ firewall daemon and Makefile
 ├── tools/                 # Generates the daemon's rule tables from policy.json
@@ -296,7 +311,7 @@ Absolute numbers depend on the machine, so compare the two paths within one run.
 ## Roadmap and known limitations
 
 - **Spoofed packets still reach the controller one by one,** so each is logged as a security warning. Drop rules for them would trade that visibility for less controller load.
-- **Switch port numbers are hard-coded** in `controller.py` to match `topology.py`'s link order, so changing the topology means updating both.
+- **Switch-to-switch links are listed by hand** in `network.json`. The controller could discover them itself with LLDP, though the zone of each host port would still need to be configured.
 - Logging and metrics for rule hits and drop counts.
 
 ## Project status
