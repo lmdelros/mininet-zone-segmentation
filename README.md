@@ -32,10 +32,11 @@ flowchart TB
 
 - **The controller is the router and the firewall.** There's no firewall appliance and no static switch rules: a custom [POX](https://github.com/noxrepo/pox) controller answers ARP for every zone's gateway, routes between zones, and enforces the access policy.
 - **Routed traffic at switch speed.** After the controller allows a connection's first packet, it installs OpenFlow rules so the switches route the rest of the connection themselves, including the TTL decrement. Routed throughput went from 4–9% of same-zone throughput to 93–100% (18.7 → 199 Mbit/s in comparable runs), and average ping dropped from about 9 ms to 1–2.5 ms.
+- **Floods of blocked traffic stay off the controller.** A blocked connection gets a drop rule on the switch it entered, so in a flood of 500 blocked pings, 1 reaches the controller instead of all 500.
 - **Stateful firewall.** The rules decide who may *start* a connection, and a connection-tracking table lets replies back in. Dept B can ping Trust, but Trust still can't start a ping to Dept B.
 - **Blocks IP and ARP spoofing.** A packet's zone comes from the switch port it arrived on, which a host can't fake, and packets whose source IP doesn't match that zone are dropped.
 - **Policy decisions in C++.** A standalone C++ daemon makes the allow/deny decision over a 13-byte binary protocol on a Unix socket, with the Python implementation as a fallback.
-- **Tested with real traffic.** A Docker-based live test sends pings and TCP connections between every pair of zones, checks connection tracking and the switch rules for routed traffic, and runs both spoofing attacks (59 checks). 283 unit tests cover the rules, connection tracking, the wire protocol, and agreement between the Python and C++ implementations. Everything runs in CI on every push.
+- **Tested with real traffic.** A Docker-based live test sends pings and TCP connections between every pair of zones, checks connection tracking and the switch rules for routed and blocked traffic, and runs both spoofing attacks (61 checks). 283 unit tests cover the rules, connection tracking, the wire protocol, and agreement between the Python and C++ implementations. Everything runs in CI on every push.
 - **Measured honestly.** The benchmark shows the C++ daemon is 5–11x *slower* per decision than in-process Python for this small rule set, and the [design notes](docs/design.md#benchmark-c-daemon-vs-in-process-python) explain why.
 
 ## Overview
@@ -127,6 +128,9 @@ Each check prints `PASS` or `FAIL`, followed by the measured reachability betwee
   [PASS] every reply arrives with TTL decremented once  (TTLs: 63, 63, 63, 63, 63)
   [PASS] core switch has a routing rule for the connection
   [PASS] switch forwarded the later packets itself  (5 packets matched the rule)
+*** Blocked flood stays off the controller (h_untrust -> h_server)
+  [PASS] controller saw the flood start but at most 10 of 200 pings  (1 reached the controller)
+  [PASS] attacker's switch holds a drop rule for the connection
 *** IP spoofing: h_untrust forges a Trust source IP toward h101
   [PASS] control: honest Trust ping reaches h101
   [PASS] attacker emitted spoofed packets  (3 sent)
@@ -230,7 +234,7 @@ sudo python3 integration/live_test.py
 
 [GitHub Actions](https://github.com/lmdelros/mininet-zone-segmentation/actions/workflows/ci.yml) runs both on every push to `main` and on pull requests.
 
-The performance test measures throughput (with iperf3) and ping latency for routed and same-zone traffic. It uses the same image (about 2 minutes):
+The performance test measures throughput (with iperf3) and ping latency for routed and same-zone traffic, then floods blocked pings and counts how many reach the controller. It uses the same image (about 2 minutes):
 
 ```bash
 docker run --rm --privileged -v "$PWD:/src:ro" -e TEST_SCRIPT=perf_test.py zone-seg-live
@@ -261,7 +265,7 @@ Absolute numbers depend on the machine, so compare the two paths within one run.
 
 ## Roadmap and known limitations
 
-- **Blocked traffic still reaches the controller packet by packet.** Only allowed connections get switch rules. Drop rules for denied connections would keep a flood of blocked packets off the controller.
+- **Spoofed packets still reach the controller one by one,** so each is logged as a security warning. Drop rules for them would trade that visibility for less controller load.
 - **Policy is hard-coded in two places,** Python and C++, kept in sync by tests. Moving it into one config file would remove the duplication.
 - **Switch port numbers are hard-coded** in `controller.py` to match `topology.py`'s link order, so changing the topology means updating both.
 - Logging and metrics for rule hits and drop counts.

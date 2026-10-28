@@ -52,7 +52,11 @@ The live test checks the result directly: the core holds a rule with `dec_ttl` f
 
 Absolute throughput swings between runs on this machine (same-zone traffic, whose code didn't change, ranged from 214 to 618 Mbit/s), so the fair comparison is routed vs. same-zone within a run. Routed traffic went from 4–9% of same-zone throughput to 93–100%. In the two runs with similar conditions (same-zone about 215–220 Mbit/s), routed throughput went from 18.7 to 199 Mbit/s, about 11x. Worst-case routed ping dropped from 38–48 ms to 3–5 ms.
 
-Blocked traffic doesn't get rules yet, so each blocked packet still goes to the controller.
+**Drop rules for blocked traffic.** When the controller blocks a connection, it installs a rule with no actions (OpenFlow's way of saying "drop") on the switch the packet entered, matching the exact connection. The rest of a blocked flood dies at the attacker's own switch instead of costing the controller a firewall check and a log line per packet.
+
+These rules expire sooner than routed ones: after 10 seconds idle or 30 seconds total. Blocked traffic is never legitimate, so a short rule costs little, and it limits one edge case: if the other side later opens a connection that reuses exactly the same addresses and ports, its replies would hit the drop rule until it expires. Packets dropped for spoofing don't get drop rules, so each one is still logged as a security warning.
+
+In the flood test (`perf_test.py`, 500 pings from `h_untrust` to `h_server` at 2 ms intervals), **500 of 500** blocked packets reached the controller before this change and **1 of 500** after. The live test clears any existing rule for that connection, floods 200 blocked pings, and checks that the first one reaches the controller, at most 10 do, and the attacker's switch holds the drop rule.
 
 ## Firewall backends
 
