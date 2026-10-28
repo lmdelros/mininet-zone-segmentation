@@ -1,0 +1,25 @@
+{
+  "zones": {
+    "DeptA": {"subnet": "10.1.1.0/24", "gateway": "10.1.1.1", "gateway_mac": "02:00:00:00:00:01"},
+    "DeptB": {"subnet": "10.1.2.0/24", "gateway": "10.1.2.1", "gateway_mac": "02:00:00:00:00:02"},
+    "DataCenter": {"subnet": "10.1.3.0/24", "gateway": "10.1.3.1", "gateway_mac": "02:00:00:00:00:03"},
+    "Trust": {"subnet": "192.47.38.0/24", "gateway": "192.47.38.1", "gateway_mac": "02:00:00:00:00:04"},
+    "Untrust": {"subnet": "108.35.24.0/24", "gateway": "108.35.24.1", "gateway_mac": "02:00:00:00:00:05"}
+  },
+  "rules": [
+    {"rule": 1, "from": ["Untrust"], "to": ["DataCenter"], "block": "all",
+     "description": "Untrust can't reach the data center at all"},
+    {"rule": 2, "from": ["Untrust"], "to": ["DeptA", "DeptB", "DataCenter"], "block": "icmp",
+     "description": "Untrust can't ping any internal zone"},
+    {"rule": 3, "from": ["Trust"], "to": ["DataCenter"], "block": "all",
+     "description": "Trust can't reach the data center at all"},
+    {"rule": 4, "from": ["Trust"], "to": ["DeptB"], "block": "icmp",
+     "description": "Trust can't ping Dept B"},
+    {"rule": 6, "from": ["DeptA"], "to": ["DeptB"], "block": "icmp",
+     "description": "Dept A and Dept B can't ping each other (this direction)"},
+    {"rule": 6, "from": ["DeptB"], "to": ["DeptA"], "block": "icmp",
+     "description": "Dept A and Dept B can't ping each other (this direction)"},
+    {"rule": 7, "from": ["DataCenter"], "to": ["Trust", "Untrust"], "block": "all",
+     "description": "The data center can't start traffic to either outside zone"}
+  ]
+}

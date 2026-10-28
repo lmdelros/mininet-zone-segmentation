@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pure zone/firewall rule logic -- no POX, no sockets, no I/O.
+"""Zone/firewall rule logic -- no POX, no sockets.
 
 Extracted from controller.py so this logic can be imported standalone
 (controller.py can't be, since it does `from pox.core import core` at
@@ -11,58 +11,78 @@ things import this module:
   - bench_firewall.py: benchmarks this implementation against the
     equivalent decision made by cpp/firewall_daemon.cpp.
 
-This is the single source of truth for zone/subnet/rule definitions;
+The zones and block rules come from policy.json, next to this file
+(override the path with the ZONE_POLICY environment variable).
 cpp/firewall_daemon.cpp hand-mirrors the same tables (see the comment
 at the top of that file for why they're duplicated rather than shared).
 """
 
 import ipaddress
+import json
+import os
+import re
 
-ZONES = {
-    'DeptA': {
-        'subnet': ipaddress.ip_network('10.1.1.0/24'),
-        'gateway': '10.1.1.1',
-        'gateway_mac': '02:00:00:00:00:01',
-    },
-    'DeptB': {
-        'subnet': ipaddress.ip_network('10.1.2.0/24'),
-        'gateway': '10.1.2.1',
-        'gateway_mac': '02:00:00:00:00:02',
-    },
-    'DataCenter': {
-        'subnet': ipaddress.ip_network('10.1.3.0/24'),
-        'gateway': '10.1.3.1',
-        'gateway_mac': '02:00:00:00:00:03',
-    },
-    'Trust': {
-        'subnet': ipaddress.ip_network('192.47.38.0/24'),
-        'gateway': '192.47.38.1',
-        'gateway_mac': '02:00:00:00:00:04',
-    },
-    'Untrust': {
-        'subnet': ipaddress.ip_network('108.35.24.0/24'),
-        'gateway': '108.35.24.1',
-        'gateway_mac': '02:00:00:00:00:05',
-    },
-}
+POLICY_PATH = os.environ.get(
+    'ZONE_POLICY', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'policy.json'))
 
-BLOCK_ALL_IP = {
-    ('Untrust', 'DataCenter'),
-    ('Trust', 'DataCenter'),
-    # The data center can't start connections to either outside zone,
-    # so the LLM server stays isolated from them in both directions.
-    ('DataCenter', 'Trust'),
-    ('DataCenter', 'Untrust'),
-}
+BLOCK_KINDS = ('all', 'icmp')
+_MAC_RE = re.compile(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$')
 
-BLOCK_ICMP = {
-    ('Untrust', 'DeptA'),
-    ('Untrust', 'DeptB'),
-    ('Untrust', 'DataCenter'),
-    ('Trust', 'DeptB'),
-    ('DeptA', 'DeptB'),
-    ('DeptB', 'DeptA'),
-}
+
+class PolicyError(ValueError):
+    """policy.json is malformed or inconsistent."""
+
+
+def load_policy(path=POLICY_PATH):
+    """Read and validate a policy file. Returns (zones, block_all_ip,
+    block_icmp): zones maps name -> {'subnet', 'gateway', 'gateway_mac'},
+    and the block sets hold (src_zone, dst_zone) pairs. Raises PolicyError
+    with a specific message instead of loading a policy that would
+    misroute traffic or silently block nothing."""
+    with open(path) as f:
+        try:
+            raw = json.load(f)
+        except ValueError as exc:
+            raise PolicyError('{}: not valid JSON: {}'.format(path, exc))
+
+    zones = {}
+    for name, z in raw.get('zones', {}).items():
+        try:
+            subnet = ipaddress.ip_network(z['subnet'])
+            gateway = ipaddress.ip_address(z['gateway'])
+        except (KeyError, ValueError) as exc:
+            raise PolicyError('zone {}: bad subnet or gateway: {}'.format(name, exc))
+        if gateway not in subnet:
+            raise PolicyError('zone {}: gateway {} is outside {}'.format(name, gateway, subnet))
+        mac = str(z.get('gateway_mac', '')).lower()
+        if not _MAC_RE.match(mac):
+            raise PolicyError('zone {}: bad gateway_mac {!r}'.format(name, mac))
+        for other, oz in zones.items():
+            if subnet.overlaps(oz['subnet']):
+                raise PolicyError('zones {} and {} overlap'.format(other, name))
+            if mac == oz['gateway_mac']:
+                raise PolicyError('zones {} and {} share gateway_mac {}'.format(other, name, mac))
+        zones[name] = {'subnet': subnet, 'gateway': str(gateway), 'gateway_mac': mac}
+    if not zones:
+        raise PolicyError('{}: no zones defined'.format(path))
+
+    blocks = {kind: set() for kind in BLOCK_KINDS}
+    for i, rule in enumerate(raw.get('rules', [])):
+        label = 'rule {}'.format(rule.get('rule', '#{}'.format(i + 1)))
+        if rule.get('block') not in BLOCK_KINDS:
+            raise PolicyError('{}: block must be one of {}'.format(label, BLOCK_KINDS))
+        for field in ('from', 'to'):
+            unknown = [z for z in rule.get(field, []) if z not in zones]
+            if unknown or not rule.get(field):
+                raise PolicyError('{}: "{}" needs known zones, got {}'.format(
+                    label, field, rule.get(field)))
+        for src in rule['from']:
+            for dst in rule['to']:
+                blocks[rule['block']].add((src, dst))
+    return zones, blocks['all'], blocks['icmp']
+
+
+ZONES, BLOCK_ALL_IP, BLOCK_ICMP = load_policy()
 
 
 def zone_for_ip(ip):

@@ -11,7 +11,7 @@ POX=/opt/pox
 
 rm -rf "$WORK" && cp -r "$SRC" "$WORK"
 cp "$WORK"/controller.py "$WORK"/firewall_rules.py "$WORK"/firewall_client.py \
-   "$WORK"/conntrack.py "$POX"/ext/
+   "$WORK"/conntrack.py "$WORK"/policy.json "$POX"/ext/
 
 echo "*** Starting Open vSwitch (userspace datapath)"
 mkdir -p /var/run/openvswitch
