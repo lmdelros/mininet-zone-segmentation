@@ -73,7 +73,14 @@ Both implementations deny traffic to or from an address outside all five zone su
 
 Both give a stateless verdict for one packet. The controller layers [connection tracking](#connection-tracking) on top, so the daemon and its wire protocol didn't need to change.
 
-The rule tables are duplicated by hand in the two languages. [`tests/test_daemon_parity.py`](../tests/test_daemon_parity.py) compiles the daemon and checks that both give the same verdict for every zone pair and protocol, so the copies can't drift apart unnoticed.
+**One policy file.** Both implementations get their zones and rules from [`policy.json`](../policy.json). The Python side loads it at import through `load_policy()`, which rejects a broken file instead of running with it:
+- malformed subnets, gateways or MAC addresses, or a gateway outside its own subnet;
+- overlapping subnets or duplicate gateway MACs, which would make routing ambiguous;
+- a rule naming a zone that doesn't exist (a typo would otherwise make the rule silently block nothing), or an unknown block type.
+
+The C++ daemon doesn't parse JSON. At build time, `make` runs [`tools/gen_policy_header.py`](../tools/gen_policy_header.py), which reads the file through the same `load_policy()` and writes `cpp/policy_generated.h`: the zone enum, subnet table and block-rule tables, compiled straight into the daemon. This keeps the daemon free of dependencies and puts both languages behind one validation step. The cost is that a policy change needs a rebuild, which `make` handles; the generator only rewrites the header when the policy changed, so unchanged builds don't recompile. The header is generated, not committed.
+
+[`tests/test_daemon_parity.py`](../tests/test_daemon_parity.py) builds the daemon from a freshly generated header and checks it gives the same verdict as Python for every zone pair and protocol, which tests both loaders and both decision functions together.
 
 ## Wire protocol
 

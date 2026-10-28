@@ -36,7 +36,8 @@ flowchart TB
 - **Stateful firewall.** The rules decide who may *start* a connection, and a connection-tracking table lets replies back in. Dept B can ping Trust, but Trust still can't start a ping to Dept B.
 - **Blocks IP and ARP spoofing.** A packet's zone comes from the switch port it arrived on, which a host can't fake, and packets whose source IP doesn't match that zone are dropped.
 - **Policy decisions in C++.** A standalone C++ daemon makes the allow/deny decision over a 13-byte binary protocol on a Unix socket, with the Python implementation as a fallback.
-- **Tested with real traffic.** A Docker-based live test sends pings and TCP connections between every pair of zones, checks connection tracking and the switch rules for routed and blocked traffic, and runs both spoofing attacks (61 checks). 283 unit tests cover the rules, connection tracking, the wire protocol, and agreement between the Python and C++ implementations. Everything runs in CI on every push.
+- **One policy file for both languages.** Zones and rules live in [`policy.json`](policy.json). The Python controller loads and validates it, and the C++ build generates its rule tables from it, so the two firewalls can't disagree.
+- **Tested with real traffic.** A Docker-based live test sends pings and TCP connections between every pair of zones, checks connection tracking and the switch rules for routed and blocked traffic, and runs both spoofing attacks (61 checks). 305 unit tests cover the rules, policy-file validation, connection tracking, the wire protocol, and agreement between the Python and C++ implementations. Everything runs in CI on every push.
 - **Measured honestly.** The benchmark shows the C++ daemon is 5–11x *slower* per decision than in-process Python for this small rule set, and the [design notes](docs/design.md#benchmark-c-daemon-vs-in-process-python) explain why.
 
 ## Overview
@@ -61,13 +62,15 @@ Here, the switches send any packet they don't have a rule for to the controller 
 
 The rules decide who may start a connection. Replies to an allowed connection are let back in even when a rule blocks that direction, so Dept B can ping Trust although rule 4 blocks Trust → Dept B ICMP. Traffic to or from an address outside all five subnets is denied before any of these rules apply.
 
+Rules 1–7 and the zones are defined in [`policy.json`](policy.json); see [Changing the policy](#changing-the-policy).
+
 ## Tech stack
 
 - **[Mininet](http://mininet.org/) 2.3**: emulates the 11 hosts, 6 switches, and links on one Linux machine ([`topology.py`](topology.py)).
 - **[Open vSwitch](https://www.openvswitch.org/)**: the virtual switches; they follow the controller's OpenFlow instructions.
 - **[POX](https://github.com/noxrepo/pox) (ichthyosaur branch, Python 3)**: the SDN controller framework that runs the router and firewall logic ([`controller.py`](controller.py)).
 - **OpenFlow 1.0**: the protocol between the switches and the controller.
-- **C++11**: the standalone firewall daemon ([`cpp/firewall_daemon.cpp`](cpp/firewall_daemon.cpp)), built with `make` and g++.
+- **C++11**: the standalone firewall daemon ([`cpp/firewall_daemon.cpp`](cpp/firewall_daemon.cpp)), built with `make` and g++. The build first generates its zone and rule tables from `policy.json` ([`tools/gen_policy_header.py`](tools/gen_policy_header.py)).
 - **Python 3.10+**: the controller, the rule logic ([`firewall_rules.py`](firewall_rules.py)), the daemon client, and the tests.
 - **pytest**: unit tests, including a suite that compiles the C++ daemon and checks it against the Python rules.
 - **Docker**: a reproducible environment that runs the whole network and the live test with one command.
@@ -215,7 +218,31 @@ To type commands into the network yourself, run it on a Linux machine or VM with
    mininet> h_untrust ping -c 2 h_server  # 100% packet loss: Untrust can't reach the server (rule 1)
    ```
 
-   The controller terminal logs a `DROP` line for every packet it blocks. Type `exit` to stop the network.
+   The controller terminal logs a `DROP` line for the first packet of each connection it blocks; the switch drops the rest of that connection itself. Type `exit` to stop the network.
+
+### Changing the policy
+
+The zones and rules 1–7 live in [`policy.json`](policy.json). Each rule lists source zones (`from`), destination zones (`to`), and what it blocks (`"all"` IP traffic or only `"icmp"`). For example, this rule would stop Dept B from reaching the data center at all:
+
+```json
+{"rule": 10, "from": ["DeptB"], "to": ["DataCenter"], "block": "all",
+ "description": "Dept B can't reach the data center"}
+```
+
+1. Edit `policy.json`. If something is wrong, such as a rule naming a zone that doesn't exist or two subnets that overlap, the controller and the C++ build both refuse to start with a message saying what's wrong.
+2. Update the expected-policy table in [`tests/test_firewall_rules.py`](tests/test_firewall_rules.py) and run the tests. That table is typed out by hand on purpose, so the tests catch a rule that doesn't do what you meant.
+
+   ```bash
+   python -m pytest
+   ```
+
+3. Rebuild the C++ daemon, which regenerates its rule tables:
+
+   ```bash
+   make -C cpp
+   ```
+
+4. On a VM, copy `policy.json` into `~/pox/ext/` again and restart the controller and the daemon. The Docker live test always uses the repository's current `policy.json`.
 
 ## Running tests
 
@@ -251,12 +278,14 @@ Absolute numbers depend on the machine, so compare the two paths within one run.
 ```text
 .
 ├── controller.py          # POX controller: ARP, routing, anti-spoofing, firewall calls
-├── firewall_rules.py      # Zone definitions and allow/deny rules (pure Python)
+├── policy.json            # Zones and firewall rules, shared by Python and C++
+├── firewall_rules.py      # Loads and validates policy.json; allow/deny decision
 ├── conntrack.py           # Connection tracking: lets replies to allowed connections back in
 ├── firewall_client.py     # Python client for the C++ daemon's socket protocol
 ├── topology.py            # Mininet network: 6 switches, 11 hosts
 ├── bench_firewall.py      # Latency benchmark: Python vs. C++ daemon
 ├── cpp/                   # C++ firewall daemon and Makefile
+├── tools/                 # Generates the daemon's rule tables from policy.json
 ├── tests/                 # pytest unit tests
 ├── integration/           # Live Mininet test and performance test
 ├── docker/                # Test image and its startup script
@@ -266,7 +295,6 @@ Absolute numbers depend on the machine, so compare the two paths within one run.
 ## Roadmap and known limitations
 
 - **Spoofed packets still reach the controller one by one,** so each is logged as a security warning. Drop rules for them would trade that visibility for less controller load.
-- **Policy is hard-coded in two places,** Python and C++, kept in sync by tests. Moving it into one config file would remove the duplication.
 - **Switch port numbers are hard-coded** in `controller.py` to match `topology.py`'s link order, so changing the topology means updating both.
 - Logging and metrics for rule hits and drop counts.
 
