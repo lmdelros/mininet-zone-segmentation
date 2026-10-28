@@ -185,10 +185,11 @@ To type commands into the network yourself, run it on a Linux machine or VM with
    git -C ~/pox checkout ichthyosaur
    ```
 
-3. From this repository's root, copy the controller, its three helper modules, and the policy file into POX's `ext/` folder, where POX looks for components:
+3. From this repository's root, copy the controller, its four helper modules, and the policy and network files into POX's `ext/` folder, where POX looks for components:
 
    ```bash
-   cp controller.py firewall_rules.py firewall_client.py conntrack.py policy.json ~/pox/ext/
+   cp controller.py firewall_rules.py firewall_client.py conntrack.py network.py \
+      policy.json network.json ~/pox/ext/
    ```
 
 4. Build and start the C++ firewall daemon. It listens on `/tmp/zone_firewall.sock`. To use the Python firewall instead, skip this step and set `USE_CPP_FIREWALL = False` in `controller.py` before copying it.

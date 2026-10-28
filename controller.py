@@ -64,6 +64,7 @@ import conntrack
 from firewall_rules import (ZONES, zone_for_ip, firewall_allowed,
                             source_ip_valid_for_zone)
 from firewall_client import FirewallClient, IPPROTO_ICMP
+from network import load_network, port_maps
 
 log = core.getLogger()
 
@@ -73,34 +74,26 @@ log = core.getLogger()
 USE_CPP_FIREWALL = True
 
 # ---------------------------------------------------------------------------
-# Static network configuration, derived from topology.py
+# Network layout, derived from network.json (the same file topology.py
+# builds the Mininet network from), so these can't disagree with the
+# real wiring. A packet's zone comes from these maps, which makes them
+# the base that anti-spoofing and the firewall rules rest on.
 # ---------------------------------------------------------------------------
 
-CORE_DPID = 6
+_PORT_MAPS = port_maps(load_network())
 
-# Leaf switches (dpid 1-5): every port belongs to the same zone.
-SWITCH_ZONE = {
-    1: 'DeptA', 2: 'DeptA',
-    3: 'DeptB', 4: 'DeptB',
-    5: 'DataCenter',
-}
+# The core switch: the only one that touches more than one zone.
+CORE_DPID = _PORT_MAPS['core_dpid']
 
-# Each leaf's uplink port, and the core port at the other end of that
-# link (addLink order again: s1-s4 have two hosts then the uplink on
-# port 3; s5 has one host then the uplink on port 2).
-LEAF_UPLINK_PORT = {1: 3, 2: 3, 3: 3, 4: 3, 5: 2}
-LEAF_CORE_PORT = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
+# Leaf switch dpid -> its zone; every port on a leaf is in that zone.
+SWITCH_ZONE = _PORT_MAPS['switch_zone']
 
-# Core switch (dpid 6): zone depends on which port, per the link order in
-# topology.py (addLink order -> port number): s1, s2, s3, s4, s5,
-# h_trust, h_untrust.
-CORE_PORT_ZONES = {
-    1: 'DeptA', 2: 'DeptA',
-    3: 'DeptB', 4: 'DeptB',
-    5: 'DataCenter',
-    6: 'Trust',
-    7: 'Untrust',
-}
+# Leaf dpid -> its uplink port, and -> the core port at the other end.
+LEAF_UPLINK_PORT = _PORT_MAPS['leaf_uplink_port']
+LEAF_CORE_PORT = _PORT_MAPS['leaf_core_port']
+
+# Core port -> the zone behind it (a leaf's zone, or a host's zone).
+CORE_PORT_ZONES = _PORT_MAPS['core_port_zones']
 
 # Inverse of the above, for scoped intra-zone flooding at the core.
 ZONE_CORE_PORTS = {}
