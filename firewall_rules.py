@@ -12,9 +12,9 @@ things import this module:
     equivalent decision made by cpp/firewall_daemon.cpp.
 
 The zones and block rules come from policy.json, next to this file
-(override the path with the ZONE_POLICY environment variable).
-cpp/firewall_daemon.cpp hand-mirrors the same tables (see the comment
-at the top of that file for why they're duplicated rather than shared).
+(override the path with the ZONE_POLICY environment variable). The C++
+daemon compiles in the same tables, generated from the same file by
+tools/gen_policy_header.py.
 """
 
 import ipaddress

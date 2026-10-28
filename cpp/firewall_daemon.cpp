@@ -2,15 +2,14 @@
 //
 // Standalone C++ zone-firewall daemon for the mininet-zone-segmentation
 // project. Listens on a Unix domain socket; for each connection, reads
-// fixed-size packet-header requests and replies with allow/deny verdicts,
-// using the same zone/subnet/rule tables as firewall_rules.py.
+// fixed-size packet-header requests and replies with allow/deny verdicts.
 //
-// This mirrors -- deliberately does NOT share code with -- the Python
-// implementation in firewall_rules.py. Sharing a process boundary here is
-// the whole point of the exercise (a real standalone component, talking
-// over a real IPC protocol), so the rule tables are hand-duplicated
-// rather than loaded from a common source. See README.md for the
-// tradeoff writeup.
+// The decision logic is a standalone C++ port of firewall_allowed() in
+// firewall_rules.py, running in its own process behind a real IPC
+// protocol. Its zone and rule tables are not hand-written: they are
+// compiled in from policy_generated.h, which tools/gen_policy_header.py
+// generates from policy.json on every `make` -- the same file the Python
+// side loads, so the two can't disagree about the policy.
 //
 // Design note on trust boundaries: the original POX controller
 // (controller.py) classifies a packet's *source* zone by which switch
@@ -37,6 +36,8 @@
 #include <string>
 #include <thread>
 #include <utility>
+
+#include "policy_generated.h"  // Zone, kZones, kBlockAllIp, kBlockIcmp
 
 namespace {
 
@@ -74,59 +75,13 @@ constexpr uint8_t kIpprotoIcmp = 1;
 
 const char* kDefaultSocketPath = "/tmp/zone_firewall.sock";
 
-// ---------------------------------------------------------------------
-// Zone/subnet tables -- mirrors ZONES in firewall_rules.py.
-// ---------------------------------------------------------------------
-
-enum class Zone : uint8_t { DeptA, DeptB, DataCenter, Trust, Untrust, Unknown };
-
-// Builds a host-byte-order IPv4 address from its four dotted-quad
-// octets, at compile time, so the table below reads the same as the
-// Python subnet literals it mirrors.
-constexpr uint32_t IpV4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
-    return (static_cast<uint32_t>(a) << 24) | (static_cast<uint32_t>(b) << 16) |
-           (static_cast<uint32_t>(c) << 8) | static_cast<uint32_t>(d);
-}
-
-struct SubnetZone {
-    Zone zone;
-    uint32_t network;      // host byte order
-    uint32_t prefix_len;
-    const char* name;      // for logging only
-};
-
-const SubnetZone kZones[] = {
-    {Zone::DeptA, IpV4(10, 1, 1, 0), 24, "DeptA"},
-    {Zone::DeptB, IpV4(10, 1, 2, 0), 24, "DeptB"},
-    {Zone::DataCenter, IpV4(10, 1, 3, 0), 24, "DataCenter"},
-    {Zone::Trust, IpV4(192, 47, 38, 0), 24, "Trust"},
-    {Zone::Untrust, IpV4(108, 35, 24, 0), 24, "Untrust"},
-};
-
-// Rule tables -- mirrors BLOCK_ALL_IP / BLOCK_ICMP in firewall_rules.py.
-// Linear scan over a handful of pairs is plenty fast for this rule
-// count; a hash set or trie would only start to matter with hundreds of
-// rules, which this project doesn't have.
-const std::pair<Zone, Zone> kBlockAllIp[] = {
-    {Zone::Untrust, Zone::DataCenter},
-    {Zone::Trust, Zone::DataCenter},
-    {Zone::DataCenter, Zone::Trust},
-    {Zone::DataCenter, Zone::Untrust},
-};
-
-const std::pair<Zone, Zone> kBlockIcmp[] = {
-    {Zone::Untrust, Zone::DeptA},
-    {Zone::Untrust, Zone::DeptB},
-    {Zone::Untrust, Zone::DataCenter},
-    {Zone::Trust, Zone::DeptB},
-    {Zone::DeptA, Zone::DeptB},
-    {Zone::DeptB, Zone::DeptA},
-};
-
-template <size_t N>
-bool ContainsPair(const std::pair<Zone, Zone> (&table)[N], Zone src, Zone dst) {
-    for (const auto& entry : table) {
-        if (entry.first == src && entry.second == dst) return true;
+// Linear scan over the generated rule tables. Plenty fast for a handful
+// of pairs; a hash set would only start to matter with hundreds of rules.
+// Takes an explicit count because an empty table is generated as a
+// one-element placeholder (C++ has no zero-size arrays).
+bool ContainsPair(const std::pair<Zone, Zone>* table, size_t count, Zone src, Zone dst) {
+    for (size_t i = 0; i < count; ++i) {
+        if (table[i].first == src && table[i].second == dst) return true;
     }
     return false;
 }
@@ -149,10 +104,10 @@ FilterResponse Decide(Zone src_zone, Zone dst_zone, bool is_icmp) {
     if (src_zone == Zone::Unknown || dst_zone == Zone::Unknown) {
         return {0, kRuleUnknownZone};
     }
-    if (ContainsPair(kBlockAllIp, src_zone, dst_zone)) {
+    if (ContainsPair(kBlockAllIp, kBlockAllIpCount, src_zone, dst_zone)) {
         return {0, kRuleBlockAllIp};
     }
-    if (is_icmp && ContainsPair(kBlockIcmp, src_zone, dst_zone)) {
+    if (is_icmp && ContainsPair(kBlockIcmp, kBlockIcmpCount, src_zone, dst_zone)) {
         return {0, kRuleBlockIcmp};
     }
     return {1, kRuleNone};

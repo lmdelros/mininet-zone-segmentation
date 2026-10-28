@@ -219,3 +219,5 @@ __marimo__/
 
 # Compiled C++ firewall daemon (built by `make -C cpp`)
 cpp/firewall_daemon
+# Generated from policy.json by tools/gen_policy_header.py (run by make)
+cpp/policy_generated.h

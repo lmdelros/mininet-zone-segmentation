@@ -1,10 +1,13 @@
-"""Python vs. C++ parity: the two hand-duplicated rule tables must agree.
+"""Python vs. C++ parity: both firewalls must give the same verdicts.
 
-Builds cpp/firewall_daemon.cpp into a temp dir, runs it on a private
-socket path (so it never touches a daemon you already have running on
-/tmp/zone_firewall.sock), and checks every zone pair x protocol against
-firewall_rules.py. Requires Linux (AF_UNIX + the daemon's POSIX headers)
-and g++; skipped otherwise.
+Both read policy.json (Python at import, C++ through the header that
+tools/gen_policy_header.py generates), so this checks the two loaders
+and the two decision functions agree. Builds the daemon from a fresh
+copy in a temp dir, runs it on a private socket path (so it never
+touches a daemon you already have running on /tmp/zone_firewall.sock),
+and checks every zone pair x protocol against firewall_rules.py.
+Requires Linux (AF_UNIX + the daemon's POSIX headers) and g++; skipped
+otherwise.
 """
 
 import os
@@ -25,6 +28,8 @@ pytestmark = pytest.mark.skipif(
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DAEMON_SRC = os.path.join(REPO_ROOT, 'cpp', 'firewall_daemon.cpp')
+GENERATOR = os.path.join(REPO_ROOT, 'tools', 'gen_policy_header.py')
+POLICY = os.path.join(REPO_ROOT, 'policy.json')
 
 # Must match the kRule* constants in firewall_daemon.cpp.
 RULE_NONE, RULE_BLOCK_ALL_IP, RULE_BLOCK_ICMP, RULE_UNKNOWN_ZONE = 0, 1, 2, 3
@@ -36,8 +41,15 @@ def daemon_socket(tmp_path_factory):
     binary = str(tmp / 'firewall_daemon')
     sock_path = str(tmp / 'fw.sock')
 
+    # Compile a copy next to a freshly generated header: the compiler
+    # looks for "policy_generated.h" beside the source first, so building
+    # in place could pick up a stale header left in cpp/ by an old make.
+    src = str(tmp / 'firewall_daemon.cpp')
+    shutil.copy(DAEMON_SRC, src)
+    subprocess.run([sys.executable, GENERATOR, POLICY,
+                    '-o', str(tmp / 'policy_generated.h')], check=True)
     subprocess.run(['g++', '-std=c++11', '-Wall', '-Wextra', '-Werror',
-                    '-O2', '-pthread', '-o', binary, DAEMON_SRC], check=True)
+                    '-O2', '-pthread', '-o', binary, src], check=True)
     proc = subprocess.Popen([binary, sock_path], stderr=subprocess.PIPE)
 
     deadline = time.monotonic() + 5
