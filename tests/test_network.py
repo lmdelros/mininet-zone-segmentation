@@ -40,6 +40,24 @@ def test_shipped_network_produces_expected_port_maps():
     assert port_maps(load_network()) == EXPECTED_MAPS
 
 
+def test_adding_hosts_needs_only_a_network_json_edit(tmp_path):
+    """The point of network.json: new hosts get the right zones in the
+    controller's maps without touching any code."""
+    def add_hosts(n):
+        n['hosts']['h105'] = {'ip': '10.1.1.105', 'switch': 's1', 'port': 4}
+        n['hosts']['h_trust2'] = {'ip': '192.47.38.110', 'switch': 's6', 'port': 8}
+    net = load_network(write(tmp_path, broken(add_hosts)))
+    maps = port_maps(net)
+
+    assert net.hosts['h105']['zone'] == 'DeptA'
+    assert net.hosts['h_trust2']['zone'] == 'Trust'
+    # A new core port appears, mapped to the new host's zone...
+    assert maps['core_port_zones'][8] == 'Trust'
+    # ...and nothing else changes (a leaf host adds no map entries).
+    maps['core_port_zones'].pop(8)
+    assert maps == EXPECTED_MAPS
+
+
 def test_host_zone_comes_from_its_ip():
     hosts = load_network().hosts
     assert hosts['h_server']['zone'] == 'DataCenter'
